@@ -4,7 +4,7 @@ ESP32-S3 front panel for WeebLabs DSPi with rotary encoder control, BLE remote l
 
 ## Hardware
 
-- Waveshare ESP32-S3-LCD-2, 320 x 240
+- Waveshare ESP32-S3-LCD-2, 320 x 240 https://thepihut.com/products/esp32-s3-development-board-with-2-ips-display-240-x-320
 - Raspberry Pi Pico or Pico 2 running DSPi firmware v1.1.5-beta5
 - Mechanical rotary encoder with push switch
 - Optional BLE HID remote; tested with an Amazon Fire TV remote
@@ -13,7 +13,7 @@ ESP32-S3 front panel for WeebLabs DSPi with rotary encoder control, BLE remote l
 
 ### ESP32 to DSPi UART
 
-| ESP32-S3-LCD-2 | DSPi Pico/Pico 2 | Function |
+| ESP32-S3-LCD-2 | DSPi Pico 2 | Function |
 |---|---|---|
 | GPIO16 | GPIO16 | ESP32 RX from DSPi TX |
 | GPIO17 | GPIO17 | ESP32 TX to DSPi RX |
