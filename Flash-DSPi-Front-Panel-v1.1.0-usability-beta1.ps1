@@ -34,6 +34,35 @@ else {
     throw "Python 3 was not found. Install Python from python.org, then run this script again."
 }
 
+# Windows PowerShell 5.1 turns a native program's stderr into a PowerShell
+# error record. With ErrorActionPreference set to Stop, a normal failed probe
+# (for example, esptool not being installed yet) would terminate this script
+# before it could run the automatic installer. Keep native commands non-fatal
+# long enough to inspect their real process exit code instead.
+$LastPythonExitCode = 0
+function Invoke-PythonCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [switch]$Quiet
+    )
+
+    $SavedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        if ($Quiet) {
+            & $Python @Arguments *> $null
+        }
+        else {
+            & $Python @Arguments
+        }
+        $script:LastPythonExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $SavedErrorActionPreference
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($Port)) {
     $Ports = @([System.IO.Ports.SerialPort]::GetPortNames() | Sort-Object)
     if ($Ports.Count -eq 1) {
@@ -54,11 +83,17 @@ if ([string]::IsNullOrWhiteSpace($Port)) {
 if ([string]::IsNullOrWhiteSpace($Port)) { throw "No COM port was supplied." }
 
 Write-Host "Checking esptool..." -ForegroundColor Cyan
-& $Python -m esptool version *> $null
-if ($LASTEXITCODE -ne 0) {
+Invoke-PythonCommand -Arguments @("-m", "esptool", "version") -Quiet
+if ($LastPythonExitCode -ne 0) {
     Write-Host "Installing esptool..." -ForegroundColor Cyan
-    & $Python -m pip install --user --upgrade esptool
-    if ($LASTEXITCODE -ne 0) { throw "esptool installation failed." }
+    Invoke-PythonCommand -Arguments @("-m", "ensurepip", "--upgrade")
+    if ($LastPythonExitCode -ne 0) { throw "Python pip setup failed." }
+
+    Invoke-PythonCommand -Arguments @("-m", "pip", "install", "--user", "--upgrade", "esptool")
+    if ($LastPythonExitCode -ne 0) { throw "esptool installation failed." }
+
+    Invoke-PythonCommand -Arguments @("-m", "esptool", "version") -Quiet
+    if ($LastPythonExitCode -ne 0) { throw "esptool was installed but could not be started." }
 }
 
 Write-Host ""
@@ -77,14 +112,14 @@ Write-Host "Close Arduino Serial Monitor and any program using $Port." -Foregrou
 Read-Host "Press ENTER to flash"
 
 if ($PreserveSettings) {
-    & $Python -m esptool --chip esp32s3 --port $Port --baud $Baud --before default-reset --after hard-reset write-flash 0x10000 $AppBin
+    Invoke-PythonCommand -Arguments @("-m", "esptool", "--chip", "esp32s3", "--port", $Port, "--baud", "$Baud", "--before", "default-reset", "--after", "hard-reset", "write-flash", "0x10000", $AppBin)
 }
 else {
-    & $Python -m esptool --chip esp32s3 --port $Port --baud $Baud --before default-reset --after no-reset erase-flash
-    if ($LASTEXITCODE -ne 0) { throw "Flash erase failed." }
-    & $Python -m esptool --chip esp32s3 --port $Port --baud $Baud --before default-reset --after hard-reset write-flash 0x0 $FullBin
+    Invoke-PythonCommand -Arguments @("-m", "esptool", "--chip", "esp32s3", "--port", $Port, "--baud", "$Baud", "--before", "default-reset", "--after", "no-reset", "erase-flash")
+    if ($LastPythonExitCode -ne 0) { throw "Flash erase failed." }
+    Invoke-PythonCommand -Arguments @("-m", "esptool", "--chip", "esp32s3", "--port", $Port, "--baud", "$Baud", "--before", "default-reset", "--after", "hard-reset", "write-flash", "0x0", $FullBin)
 }
 
-if ($LASTEXITCODE -ne 0) { throw "Firmware flash failed." }
+if ($LastPythonExitCode -ne 0) { throw "Firmware flash failed." }
 Write-Host ""
 Write-Host "DSPi ESP32 Front Panel v1.1.0-usability beta 1 flashed successfully." -ForegroundColor Green
