@@ -15,7 +15,7 @@ The `v1.1.0-usability` branch is a hardware-test beta built from the protected v
 - `System > Volume Limit` is a device-wide safety ceiling. Applying it switches DSPi to Independent/Global master-volume mode, verifies the live value, and persists the value in DSPi.
 - The System status screen no longer gives Psy Bass special treatment; Psy Bass remains a normal listening feature.
 
-The beta was compiled for the listed board profile with ESP32 core 3.3.8, GFX Library for Arduino 1.6.5 and NimBLE-Arduino 2.5.0. It uses 1,001,582 bytes (31%) of the app partition and 38,000 bytes (11%) of dynamic memory.
+The beta was compiled for the listed board profile with ESP32 core 3.3.8, GFX Library for Arduino 1.6.5 and NimBLE-Arduino 2.5.0. It uses 1,001,726 bytes (31%) of the app partition and 38,000 bytes (11%) of dynamic memory.
 
 Use [the beta hardware checklist](V1.1.0-USABILITY-BETA1-TEST-CHECKLIST.md) before promoting this branch to a stable release.
 

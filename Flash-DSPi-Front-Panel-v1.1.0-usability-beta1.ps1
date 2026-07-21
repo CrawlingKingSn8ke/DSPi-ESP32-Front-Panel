@@ -10,8 +10,8 @@ Set-StrictMode -Version Latest
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $FullBin = Join-Path $Root "release\DSPi_ESP32_Front_Panel_v1_1_0_usability_beta1_Full.bin"
 $AppBin = Join-Path $Root "release\DSPi_ESP32_Front_Panel_v1_1_0_usability_beta1.bin"
-$ExpectedFullHash = "607693DC221180EF3298B0C74614AB77A020091CDB908FFB3830385776234E9B"
-$ExpectedAppHash = "CE37060A0BDA4B5744D54D584D07B542393334287DDA550A281BF769430AFE91"
+$ExpectedFullHash = "039F3D73C6FD631B306B0A93995DBA261B9C477BC847642D8211814EB3ABB7CE"
+$ExpectedAppHash = "A7D790CC70EC6CE7F1E94AF8392949D33B5ECB8AA314CC303BCF1F5EFAE21879"
 
 Set-Location -LiteralPath $Root
 

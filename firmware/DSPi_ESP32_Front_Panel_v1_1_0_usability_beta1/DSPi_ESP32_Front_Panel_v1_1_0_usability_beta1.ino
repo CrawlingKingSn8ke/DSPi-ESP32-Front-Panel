@@ -8592,18 +8592,29 @@ void drawChangeOverlay()
   drawBase();
 
   if (changeOverlayKind == CHANGE_OVERLAY_PRESET) {
-    drawFontCentredGlowColour(FontSmall, 18, "Preset", C_CYAN);
-    String slot = "P" + String((int)changeOverlayPreset + 1);
-    drawFontCentredGlowColour(FontLarge, 54, slot, C_WHITE);
-
     String name = presetName(changeOverlayPreset);
     if (!name.length()) name = "Preset " + String((int)changeOverlayPreset + 1);
     const int16_t maximumWidth = UI_W - 24;
-    if (fontTextWidth(FontMedium, name) <= maximumWidth) {
-      drawFontCentredGlowColour(FontMedium, 164, name, C_WHITE);
+    int16_t unscaledWidth = fontTextWidthKerned(FontLarge, name);
+    uint8_t scalePercent = unscaledWidth > 0
+      ? (uint8_t)std::min<int16_t>(68, (maximumWidth * 100L) / unscaledWidth)
+      : 68;
+
+    if (scalePercent >= 34) {
+      int16_t scaledWidth = fontTextWidthScaledKerned(FontLarge, name, scalePercent);
+      int16_t x = std::max<int16_t>(0, (UI_W - scaledWidth) / 2);
+      uint16_t glow = blend565(C_BLACK, C_WHITE, 74);
+      drawFontTextScaledKerned(FontLarge, x + 1, 43, name, glow, scalePercent);
+      drawFontTextScaledKerned(FontLarge, x, 44, name, glow, scalePercent);
+      drawFontTextScaledKerned(FontLarge, x, 43, name, C_WHITE, scalePercent);
+    } else if (fontTextWidth(FontMedium, name) <= maximumWidth) {
+      drawFontCentredGlowColour(FontMedium, 72, name, C_WHITE);
     } else {
-      drawFontCentredGlowColour(FontSmall, 178, name, C_WHITE);
+      drawFontCentredGlowColour(FontSmall, 78, name, C_WHITE);
     }
+
+    String slot = "P" + String((int)changeOverlayPreset + 1);
+    drawFontCentredGlowColour(FontSmall, 174, slot, C_WHITE);
   } else {
     drawFontCentredGlowColour(FontSmall, 24, "Input", C_CYAN);
     String source = inputSourceDisplayText(changeOverlaySource);
@@ -9590,12 +9601,23 @@ void applyEncoderDetents(int16_t detents)
     if (steps) bleNavigate(steps);
     return;
   }
-  encoderMenuDetentRemainder = 0;
   if (uiView == VIEW_EDIT) {
-    int direction = detents > 0 ? 1 : -1;
-    uint16_t count = (uint16_t)abs(detents);
+    // This encoder generates two decoded events for each physical click.
+    // Menu navigation already combines those events; edit mode must do the
+    // same or booleans toggle twice and 5% values jump by 10%.
+    if ((encoderMenuDetentRemainder > 0 && detents < 0) ||
+        (encoderMenuDetentRemainder < 0 && detents > 0)) {
+      encoderMenuDetentRemainder = 0;
+    }
+    encoderMenuDetentRemainder += detents;
+    int16_t steps = encoderMenuDetentRemainder / ENCODER_MENU_DETENTS_PER_STEP;
+    encoderMenuDetentRemainder -= steps * ENCODER_MENU_DETENTS_PER_STEP;
+    int direction = steps > 0 ? 1 : -1;
+    uint16_t count = (uint16_t)abs(steps);
     while (count--) adjustEdit(direction);
+    return;
   }
+  encoderMenuDetentRemainder = 0;
 }
 
 void pollEncoder()
