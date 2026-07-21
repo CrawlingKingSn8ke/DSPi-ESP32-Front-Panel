@@ -56,8 +56,9 @@ Power the ESP32 through its 5V/VBUS input and share ground with the DSPi. Do not
 ## Flash v1.1.0-usability beta 1 on Windows
 
 1. Download or clone the `v1.1.0-usability` branch.
-2. Connect the ESP32-S3-LCD-2 by USB and close Arduino Serial Monitor.
-3. Open PowerShell in the project folder and run:
+2. Install Python 3 from python.org if `py --version` does not show a version.
+3. Connect the ESP32-S3-LCD-2 by USB and close Arduino Serial Monitor.
+4. Open PowerShell in the project folder and run:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.0-usability-beta1.ps1"
@@ -69,7 +70,7 @@ To update the app while preserving BLE pairing and panel settings:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.0-usability-beta1.ps1" -PreserveSettings
 ```
 
-The script verifies both firmware SHA-256 hashes before flashing. A clean install erases BLE pairing, key mappings, brightness, screen-power settings and shortcut assignments.
+The script installs or updates Python `pip` and `esptool` when needed, verifies both firmware SHA-256 hashes, and then flashes the panel. A clean install erases BLE pairing, key mappings, brightness, screen-power settings and shortcut assignments.
 
 ## Flash the stable v1.0.0 release on Windows
 
