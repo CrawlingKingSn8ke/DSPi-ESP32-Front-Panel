@@ -1,30 +1,30 @@
 # DSPi ESP32 Front Panel
 
-ESP32-S3 front panel for WeebLabs DSPi with rotary encoder control, BLE remote learning, source and DSP feature menus, stereo bar meters, and a combined analogue VU meter.
+ESP32-S3 front panel for WeebLabs DSPi with rotary encoder control, BLE remote learning, source and DSP feature menus, stereo bar meters, analogue VU display, SD-card music playback and Wi-Fi Music Transfer.
 
-## v1.1.0-usability beta 1
+## Version 1.1.2
 
-The `v1.1.0-usability` branch is a hardware-test beta built from the protected v1.0.0 front-panel baseline and audited against WeebLabs DSPi `release/v1.1.5`.
+Version 1.1.2 adds the integrated music player and Wi-Fi file-transfer features while retaining the existing DSPi control interface.
 
-- The analogue meter uses display-only calibration so ordinary programme peaks occupy more of the approved VU face. DSPi telemetry and the stereo meters remain unchanged.
-- `Preset > Save Current` overwrites the active slot after a No/Yes confirmation, using DSPi's native complete-preset save command. DSPi remains the only owner of audio state and preset data.
-- Preset and source shortcuts show clean, large distance-view confirmations.
-- Home-screen shortcuts now include Up, Down, Left, Right and Centre, with previous/next preset and input choices. Existing four-direction assignments migrate automatically.
-- `System > Screen Settings` contains timeout, dim level and brightness. Remote or encoder input wakes a dimmed or dark backlight with a non-blocking fade.
-- Menu movement requires two encoder notches per item; home and VU volume control remains 0.5 dB per notch.
-- `System > Volume Limit` is a device-wide safety ceiling. Applying it switches DSPi to Independent/Global master-volume mode, verifies the live value, and persists the value in DSPi.
-- The System status screen no longer gives Psy Bass special treatment; Psy Bass remains a normal listening feature.
+### Main changes
 
-The beta was compiled for the listed board profile with ESP32 core 3.3.8, GFX Library for Arduino 1.6.5 and NimBLE-Arduino 2.5.0. It uses 1,001,726 bytes (31%) of the app partition and 38,000 bytes (11%) of dynamic memory.
+- WAV, FLAC and MP3 playback from microSD.
+- Folder and album browsing with artwork support.
+- Play, pause, seek, previous/next track and automatic track advance.
+- Browser-based Wi-Fi upload, folder creation and file/folder deletion.
+- Upload progress, transfer speed and estimated completion time.
+- Playback-safe SD operation for long listening sessions.
+- Existing preset, input, volume-limit, display, VU-meter and BLE remote features remain available.
 
-Use [the beta hardware checklist](V1.1.0-USABILITY-BETA1-TEST-CHECKLIST.md) before promoting this branch to a stable release.
+See [CHANGELOG-v1.1.2.md](CHANGELOG-v1.1.2.md) for the concise release summary.
 
 ## Hardware
 
-- Waveshare ESP32-S3-LCD-2, 320 x 240 https://thepihut.com/products/esp32-s3-development-board-with-2-ips-display-240-x-320
-- Raspberry Pi Pico or Pico 2 running DSPi firmware v1.1.5-beta5
-- Mechanical rotary encoder with push switch
-- Optional BLE HID remote; tested with an Amazon Fire TV remote
+- Waveshare ESP32-S3-LCD-2, 320 x 240.
+- Raspberry Pi Pico or Pico 2 running compatible DSPi firmware.
+- Mechanical rotary encoder with push switch.
+- Optional BLE HID remote.
+- microSD card formatted as FAT32 or exFAT.
 
 ## Wiring
 
@@ -36,7 +36,7 @@ Use [the beta hardware checklist](V1.1.0-USABILITY-BETA1-TEST-CHECKLIST.md) befo
 | GPIO17 | GPIO17 | ESP32 TX to DSPi RX |
 | GND | GND | Common ground |
 
-The UART runs at 115200 baud. Enable the DSPi UART interface with TX GPIO16 and RX GPIO17 before using the panel.
+The UART runs at 115200 baud. Enable the DSPi UART interface with TX GPIO16 and RX GPIO17.
 
 ### Rotary encoder
 
@@ -47,67 +47,52 @@ The UART runs at 115200 baud. Enable the DSPi UART interface with TX GPIO16 and 
 | Push switch | GPIO21 |
 | Common / switch return | GND |
 
-For an encoder module, power it from 3.3 V, not 5 V.
+Power encoder modules from 3.3 V, not 5 V.
 
-### Power
+## Flash on Windows
 
-Power the ESP32 through its 5V/VBUS input and share ground with the DSPi. Do not connect the two boards' 3.3 V rails together. Avoid connecting external 5 V and a powered USB cable to the ESP32 at the same time unless the supplies are isolated.
-
-## Flash v1.1.0-usability beta 1 on Windows
-
-1. Download or clone the `v1.1.0-usability` branch.
-2. Install Python 3 from python.org if `py --version` does not show a version.
-3. Connect the ESP32-S3-LCD-2 by USB and close Arduino Serial Monitor.
-4. Open PowerShell in the project folder and run:
+1. Download or clone the `review/v1.1.2` branch.
+2. Install Python 3 if `py --version` does not show a version.
+3. Connect the ESP32-S3-LCD-2 by USB.
+4. Close Arduino Serial Monitor and any program using the COM port.
+5. Open PowerShell in the project folder and run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.0-usability-beta1.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.2.ps1"
 ```
 
-To update the app while preserving BLE pairing and panel settings:
+The script asks for or detects the COM port, installs the required build tools when needed, compiles the firmware and performs a clean flash.
+
+To update only the application while preserving BLE pairing and panel settings:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.0-usability-beta1.ps1" -PreserveSettings
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.2.ps1" -PreserveSettings
 ```
 
-The script installs or updates Python `pip` and `esptool` when needed, verifies both firmware SHA-256 hashes, and then flashes the panel. A clean install erases BLE pairing, key mappings, brightness, screen-power settings and shortcut assignments.
-
-## Flash the stable v1.0.0 release on Windows
-
-1. Download and extract the release ZIP.
-2. Connect the ESP32-S3-LCD-2 by USB.
-3. Close Arduino Serial Monitor.
-4. Open PowerShell in the extracted folder and run:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel.ps1"
-```
-
-The script detects or asks for the COM port, installs `esptool` through Python when needed, verifies the firmware hashes, and performs a clean install.
-
-To update the firmware while preserving BLE pairing and saved panel settings:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel.ps1" -PreserveSettings
-```
-
-A clean install erases saved BLE pairing, key mappings, brightness, and other panel settings.
+A clean flash erases BLE pairing, learned key mappings, brightness, screen-power settings and shortcut assignments. After a clean flash, disconnect all power for at least 10 seconds before reconnecting.
 
 ## Build from source
 
-Open:
+Run:
 
-```text
-firmware\DSPi_ESP32_Front_Panel_v1_1_0_usability_beta1\DSPi_ESP32_Front_Panel_v1_1_0_usability_beta1.ino
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.1.2.ps1"
 ```
 
-Required libraries and board package:
+The script installs or verifies:
 
-- ESP32 Arduino core 3.3.8
+- ESP32 Arduino core 3.3.11
 - GFX Library for Arduino 1.6.5
 - NimBLE-Arduino 2.5.0
+- SdFat 2.3.0
 
-Arduino board settings:
+The Arduino sketch is:
+
+```text
+firmware\DSPi_ESP32_Front_Panel_v1_1_2\DSPi_ESP32_Front_Panel_v1_1_2.ino
+```
+
+Board profile:
 
 ```text
 Board: ESP32S3 Dev Module
@@ -120,12 +105,49 @@ Partition Scheme: 16M Flash (3MB APP / 9.9MB FATFS)
 PSRAM: OPI
 ```
 
-## BLE remote setup
+## Music playback
 
-With no remote saved, open `Remote > Find Remote`, select the device, then use `Remote > Key Map` to learn buttons. A saved remote must be removed before another remote can be searched for.
+Supported audio formats:
+
+- WAV
+- FLAC
+- MP3
+
+The player supports folder browsing, artwork, pause/resume, seeking, previous/next track and automatic track advance. Normal playback uses the shared SD interface at 20 MHz, with lower-speed fallbacks when required.
+
+Restrictions:
+
+- Playback and Wi-Fi Music Transfer cannot use the SD card at the same time.
+- Stop playback before starting Wi-Fi Music Transfer.
+- Very large or unusual artwork may be skipped if it cannot be decoded safely.
+- Unsupported, corrupt or unusually encoded files may be skipped.
+- Removing the card while mounted or playing is not supported.
+- After a genuine SD-card fault, remove all power before retrying.
+
+## Wi-Fi Music Transfer
+
+Open the Music Transfer option on the panel and confirm Start. The panel displays the Wi-Fi connection details and browser address.
+
+From a phone or computer:
+
+1. Connect to the network shown by the panel, or use the configured home network mode.
+2. Open the displayed address in a browser.
+3. Browse the SD card, create folders, upload files or delete files and folders.
+4. Wait for all transfers to complete.
+5. Select **Finish Safely** before returning to normal playback.
+
+Typical transfer performance is approximately **0.45 to 0.60 MB/s**, depending on the microSD card, Wi-Fi conditions, browser and file size. Transfer speed is intentionally limited by the shared SPI SD interface and safe write handling.
+
+Wi-Fi transfer restrictions:
+
+- Only one upload is written at a time.
+- Playback is unavailable while transfer mode owns the SD card.
+- Do not remove power or the SD card during an upload.
+- Use Finish Safely before returning to the player.
+- A full power cycle may be required before a previously paired BLE remote reconnects after transfer mode.
 
 ## Notes
 
-- The panel controls DSPi over UART; it is not in the audio path.
-- Input choices and feature availability follow the connected DSPi firmware and configuration.
-- The VU meters show actual DSPi output peaks, not the volume-control position.
+- The ESP32 front panel controls DSPi over UART and is not in the audio signal path.
+- Input choices and DSP features depend on the connected DSPi firmware and configuration.
+- The VU meters show DSPi output telemetry, not the volume-control position.

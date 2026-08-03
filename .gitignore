@@ -1,1 +1,13 @@
 /build/
+/release/
+*.bin
+*.elf
+*.map
+*.uf2
+.vscode/
+.idea/
+*.user
+*.suo
+WifiCredentials.h
+*.secrets.h
+.env
