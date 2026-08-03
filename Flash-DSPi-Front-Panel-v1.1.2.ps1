@@ -10,34 +10,41 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$EncodedPatch = Join-Path $Root "firmware\DSPi-ESP32-Front-Panel-v1.1.2.patch.gz.b64"
 $CompressedPatch = Join-Path $Root "firmware\DSPi-ESP32-Front-Panel-v1.1.2.patch.gz"
 $PatchFile = Join-Path $Root "firmware\DSPi-ESP32-Front-Panel-v1.1.2.patch"
 $Engine = Join-Path $Root "Build-and-Flash-DSPi-Front-Panel-v1.1.2.ps1"
 
-if (-not (Test-Path -LiteralPath $CompressedPatch -PathType Leaf)) {
-    throw "Firmware source update not found: $CompressedPatch"
+if (-not (Test-Path -LiteralPath $EncodedPatch -PathType Leaf)) {
+    throw "Firmware source update not found: $EncodedPatch"
 }
 if (-not (Test-Path -LiteralPath $Engine -PathType Leaf)) {
     throw "Build and flash engine not found: $Engine"
 }
 
-if (-not (Test-Path -LiteralPath $PatchFile -PathType Leaf)) {
-    $input = [System.IO.File]::OpenRead($CompressedPatch)
+# Recreate the patch on every run. This avoids stale or partially extracted
+# files left by an interrupted earlier build.
+$base64 = (Get-Content -LiteralPath $EncodedPatch -Raw) -replace '\s', ''
+$compressedBytes = [Convert]::FromBase64String($base64)
+[System.IO.File]::WriteAllBytes($CompressedPatch, $compressedBytes)
+
+$input = [System.IO.File]::OpenRead($CompressedPatch)
+try {
+    $gzip = New-Object System.IO.Compression.GZipStream(
+        $input,
+        [System.IO.Compression.CompressionMode]::Decompress
+    )
     try {
-        $gzip = New-Object System.IO.Compression.GZipStream(
-            $input,
-            [System.IO.Compression.CompressionMode]::Decompress
-        )
-        try {
-            $output = [System.IO.File]::Create($PatchFile)
-            try { $gzip.CopyTo($output) }
-            finally { $output.Dispose() }
-        }
-        finally { $gzip.Dispose() }
+        $output = [System.IO.File]::Create($PatchFile)
+        try { $gzip.CopyTo($output) }
+        finally { $output.Dispose() }
     }
-    finally { $input.Dispose() }
+    finally { $gzip.Dispose() }
 }
+finally { $input.Dispose() }
 
 $arguments = @(
     "-NoProfile",
