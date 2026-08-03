@@ -11,3 +11,4 @@
 WifiCredentials.h
 *.secrets.h
 .env
+firmware/*.patch
