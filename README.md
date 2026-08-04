@@ -2,21 +2,24 @@
 
 ESP32-S3 front panel for WeebLabs DSPi with rotary encoder control, BLE remote learning, source and DSP feature menus, stereo bar meters, analogue VU display, SD-card music playback and Wi-Fi Music Transfer.
 
-## Version 1.1.2
+## Version 1.1.3
 
-Version 1.1.2 adds the integrated music player and Wi-Fi file-transfer features while retaining the existing DSPi control interface.
+Version 1.1.3 is the public compatibility update for DSPi firmware v1.1.5. It adds the fourth selectable S/PDIF input while retaining the music-player, Wi-Fi transfer and control-panel features introduced in v1.1.2.
 
 ### Main changes
 
+- Supports the four-input S/PDIF inventory reported by DSPi firmware v1.1.5.
+- Adds S/PDIF 4 as input-source value 6 when it is enabled by DSPi.
+- Accepts both the older three-input and current four-input `0xEF` responses.
+- Keeps source validation, preset restoration and media-route restoration aligned with the expanded source enum.
 - WAV, FLAC and MP3 playback from microSD.
 - Folder and album browsing with artwork support.
 - Play, pause, seek, previous/next track and automatic track advance.
 - Browser-based Wi-Fi upload, folder creation and file/folder deletion.
-- Upload progress, transfer speed and estimated completion time.
 - Playback-safe SD operation for long listening sessions.
-- Existing preset, input, volume-limit, display, VU-meter and BLE remote features remain available.
+- Existing preset, volume-limit, display, VU-meter and BLE remote features remain available.
 
-See [CHANGELOG-v1.1.2.md](CHANGELOG-v1.1.2.md) for the concise release summary.
+See [CHANGELOG-v1.1.3.md](CHANGELOG-v1.1.3.md) for the concise release summary.
 
 ## Hardware
 
@@ -25,6 +28,11 @@ See [CHANGELOG-v1.1.2.md](CHANGELOG-v1.1.2.md) for the concise release summary.
 - Mechanical rotary encoder with push switch.
 - Optional BLE HID remote.
 - microSD card formatted as FAT32 or exFAT.
+
+## DSPi compatibility
+
+- DSPi firmware v1.1.5: four S/PDIF inputs are supported.
+- Earlier compatible DSPi firmware: the fourth S/PDIF source remains hidden when only three inputs are reported.
 
 ## Wiring
 
@@ -51,22 +59,22 @@ Power encoder modules from 3.3 V, not 5 V.
 
 ## Flash on Windows
 
-1. Download or clone the `review/v1.1.2` branch.
+1. Download the v1.1.3 release source or clone `main`.
 2. Install Python 3 if `py --version` does not show a version.
 3. Connect the ESP32-S3-LCD-2 by USB.
 4. Close Arduino Serial Monitor and any program using the COM port.
 5. Open PowerShell in the project folder and run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.2.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.3.ps1"
 ```
 
-The script asks for or detects the COM port, installs the required build tools when needed, compiles the firmware and performs a clean flash.
+The script asks for or uses the supplied COM port, installs the required build tools when needed, compiles the firmware and performs a clean flash.
 
 To update only the application while preserving BLE pairing and panel settings:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.2.ps1" -PreserveSettings
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.3.ps1" -PreserveSettings
 ```
 
 A clean flash erases BLE pairing, learned key mappings, brightness, screen-power settings and shortcut assignments. After a clean flash, disconnect all power for at least 10 seconds before reconnecting.
@@ -76,7 +84,7 @@ A clean flash erases BLE pairing, learned key mappings, brightness, screen-power
 Run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.1.2.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.1.3.ps1"
 ```
 
 The script installs or verifies:
@@ -86,11 +94,13 @@ The script installs or verifies:
 - NimBLE-Arduino 2.5.0
 - SdFat 2.3.0
 
-The Arduino sketch is:
+The Arduino sketch retains its historical v1.1.2 directory name so the existing Arduino project and patch preparation remain stable:
 
 ```text
 firmware\DSPi_ESP32_Front_Panel_v1_1_2\DSPi_ESP32_Front_Panel_v1_1_2.ino
 ```
+
+The v1.1.3 wrappers build and name the release artifacts as v1.1.3.
 
 Board profile:
 
