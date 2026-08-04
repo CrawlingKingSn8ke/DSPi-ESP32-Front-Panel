@@ -40,15 +40,19 @@ foreach ($file in @($OldFull, $OldApp)) {
 Copy-Item -LiteralPath $OldFull -Destination $NewFull -Force
 Copy-Item -LiteralPath $OldApp -Destination $NewApp -Force
 
+$fullHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $NewFull).Hash
+$appHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $NewApp).Hash
 $rows = @(
-    "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $NewFull).Hash, (Split-Path -Leaf $NewFull),
-    "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $NewApp).Hash, (Split-Path -Leaf $NewApp)
+    ("{0}  {1}" -f $fullHash, (Split-Path -Leaf $NewFull))
+    ("{0}  {1}" -f $appHash, (Split-Path -Leaf $NewApp))
 )
 $rows | Set-Content -LiteralPath (Join-Path $ReleaseDir "SHA256SUMS-v1.1.3.txt") -Encoding ASCII
 
 Write-Host ""
 Write-Host "DSPi ESP32 Front Panel v1.1.3 artifacts ready:" -ForegroundColor Green
 Write-Host "  $NewFull"
+Write-Host "  SHA256: $fullHash"
 Write-Host "  $NewApp"
+Write-Host "  SHA256: $appHash"
 Write-Host "  $(Join-Path $ReleaseDir 'SHA256SUMS-v1.1.3.txt')"
 Write-Host "No device was flashed."
