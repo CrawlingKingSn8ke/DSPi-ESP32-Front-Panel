@@ -53,9 +53,11 @@ if (Test-Path -LiteralPath $OldApp -PathType Leaf) {
 }
 if ((Test-Path -LiteralPath $NewFull -PathType Leaf) -and
     (Test-Path -LiteralPath $NewApp -PathType Leaf)) {
+    $fullHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $NewFull).Hash
+    $appHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $NewApp).Hash
     @(
-        "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $NewFull).Hash, (Split-Path -Leaf $NewFull),
-        "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $NewApp).Hash, (Split-Path -Leaf $NewApp)
+        ("{0}  {1}" -f $fullHash, (Split-Path -Leaf $NewFull))
+        ("{0}  {1}" -f $appHash, (Split-Path -Leaf $NewApp))
     ) | Set-Content -LiteralPath (Join-Path $ReleaseDir "SHA256SUMS-v1.1.3.txt") -Encoding ASCII
 }
 
