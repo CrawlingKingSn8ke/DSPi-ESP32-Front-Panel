@@ -5256,14 +5256,26 @@ enum BleScanPurpose : uint8_t {
   BLE_SCAN_RECONNECT
 };
 
+// Mirrors the firmware InputSource enum (audio_input.h). The optional S/PDIF
+// sources must stay contiguous: nextInputSourceChoice() walks them by value.
 enum InputSource : uint8_t {
   SRC_USB = 0,
   SRC_OPTICAL = 1,
   SRC_I2S = 2,
   SRC_ADAT = 3,
   SRC_OPTICAL_2 = 4,
-  SRC_OPTICAL_3 = 5
+  SRC_OPTICAL_3 = 5,
+  SRC_OPTICAL_4 = 6
 };
+
+// Highest source this panel understands, and the count derived from it. Every
+// readback bound check uses these, so adding a source is a one-line change.
+static const uint8_t SRC_MAX = SRC_OPTICAL_4;
+static const uint8_t SRC_COUNT = SRC_MAX + 1;
+
+// S/PDIF inputs the panel can track. Firmware v1.1.5 reports 4; older builds
+// report 3, and a future build reporting more is clamped to this.
+static const uint8_t PANEL_MAX_SPDIF_INPUTS = 4;
 
 enum UiAction : uint8_t {
   ACT_NONE,
@@ -5346,7 +5358,7 @@ struct DspiState {
   uint32_t sampleRate;
   uint8_t spdifInputCount;
   uint8_t spdifOptionalEnableMask;
-  uint8_t spdifPins[3];
+  uint8_t spdifPins[PANEL_MAX_SPDIF_INPUTS];
   uint8_t spdifState;
   bool spdifNonAudio;
   bool adatInputEnabled;
@@ -7241,7 +7253,8 @@ bool syncPsybassCandidate(DspiState &candidate)
 
 bool isSpdifSource(InputSource source)
 {
-  return source == SRC_OPTICAL || source == SRC_OPTICAL_2 || source == SRC_OPTICAL_3;
+  return source == SRC_OPTICAL || source == SRC_OPTICAL_2 ||
+         source == SRC_OPTICAL_3 || source == SRC_OPTICAL_4;
 }
 
 bool picoInputPinSane(uint8_t pin, uint8_t platform, bool allowUnset)
@@ -7264,6 +7277,10 @@ bool inputSourceAvailable(InputSource source)
       return (dspi.spdifOptionalEnableMask & 0x01u) != 0;
     case SRC_OPTICAL_3:
       return (dspi.spdifOptionalEnableMask & 0x02u) != 0;
+    case SRC_OPTICAL_4:
+      // Firmware older than v1.1.5 reports 3 inputs and never sets this bit,
+      // so the source stays hidden there without a version check.
+      return (dspi.spdifOptionalEnableMask & 0x04u) != 0;
   }
   return false;
 }
@@ -7272,9 +7289,9 @@ InputSource nextInputSourceChoice(InputSource current, int direction)
 {
   // Only sources present in the last verified Console inventory are exposed.
   // USB, first S/PDIF and I2S are always available, so this always terminates.
-  for (uint8_t step = 0; step < 6; step++) {
+  for (uint8_t step = 0; step < SRC_COUNT; step++) {
     current = (InputSource)(((int)current +
-                             (direction >= 0 ? 1 : -1) + 6) % 6);
+                             (direction >= 0 ? 1 : -1) + SRC_COUNT) % SRC_COUNT);
     if (inputSourceAvailable(current)) return current;
   }
   return current;
@@ -7289,6 +7306,7 @@ String inputSourceDisplayText(InputSource source)
     case SRC_ADAT: return "ADAT";
     case SRC_OPTICAL_2: return "S/PDIF 2";
     case SRC_OPTICAL_3: return "S/PDIF 3";
+    case SRC_OPTICAL_4: return "S/PDIF 4";
   }
   return "Unknown";
 }
@@ -7307,17 +7325,31 @@ bool syncCurrentState(bool includePresetNames)
   candidate.firmwareMinorPatchBcd = platformPayload[2];
   candidate.outputChannels = platformPayload[3];
 
-  uint8_t spdifConfig[5] = {0};
-  if (!getExact(REQ_GET_SPDIF_INPUT_CONFIG, 0, 5,
-                spdifConfig, sizeof(spdifConfig))) return false;
-  // Official beta5 byte 1 is an all-input mask: bit 0 is S/PDIF 1 and is
-  // always set; bits 1/2 are the optional inputs. Store only the optional
-  // part, shifted down, so availability consistently uses bits 0/1.
-  if (spdifConfig[0] != 3 || (spdifConfig[1] & ~0x07u) != 0 ||
-      (spdifConfig[1] & 0x01u) == 0) return false;
-  candidate.spdifInputCount = spdifConfig[0];
-  candidate.spdifOptionalEnableMask = (spdifConfig[1] >> 1) & 0x03u;
-  for (uint8_t input = 0; input < 3; input++) {
+  // Response is 2 + input-count bytes, and the count is firmware-dependent
+  // (3 before v1.1.5, 4 from v1.1.5), so size everything off byte 0 instead
+  // of pinning a length. wLength caps the reply device-side, so a firmware
+  // with more inputs than this panel knows arrives truncated, not rejected.
+  uint8_t spdifConfig[2 + PANEL_MAX_SPDIF_INPUTS] = {0};
+  uint16_t spdifLength = 0;
+  if (!dspiGet(REQ_GET_SPDIF_INPUT_CONFIG, 0, sizeof(spdifConfig), spdifConfig,
+               sizeof(spdifConfig), spdifLength)) return false;
+  uint8_t reportedInputs = spdifConfig[0];
+  if (reportedInputs < 1 || reportedInputs > 8) return false;
+  uint8_t usableInputs = reportedInputs < PANEL_MAX_SPDIF_INPUTS
+                       ? reportedInputs : PANEL_MAX_SPDIF_INPUTS;
+  // Only the inputs actually read back are validated; a truncated tail is
+  // fine because those inputs are not exposed anyway.
+  if (spdifLength < (uint16_t)(2 + usableInputs)) return false;
+  // Byte 1 is an all-input mask covering every reported input: bit 0 is
+  // S/PDIF 1 and is always set. Store only the optional part, shifted down,
+  // so availability consistently uses bits 0..n.
+  uint8_t liveMask = (uint8_t)((1u << reportedInputs) - 1u);
+  if ((spdifConfig[1] & ~liveMask) != 0 || (spdifConfig[1] & 0x01u) == 0) return false;
+  candidate.spdifInputCount = usableInputs;
+  candidate.spdifOptionalEnableMask =
+    (uint8_t)((spdifConfig[1] >> 1) & ((1u << (usableInputs - 1)) - 1u));
+  memset(candidate.spdifPins, 0xFF, sizeof(candidate.spdifPins));
+  for (uint8_t input = 0; input < usableInputs; input++) {
     bool allowUnset = input != 0 &&
       (candidate.spdifOptionalEnableMask & (1u << (input - 1))) == 0;
     if (!picoInputPinSane(spdifConfig[input + 2], candidate.platform, allowUnset)) return false;
@@ -7336,7 +7368,7 @@ bool syncCurrentState(bool includePresetNames)
   candidate.adatInputPin = adatPinPayload[0];
 
   uint8_t byteValue = 0;
-  if (!getExactByte(REQ_GET_INPUT_SOURCE, byteValue) || byteValue > SRC_OPTICAL_3) return false;
+  if (!getExactByte(REQ_GET_INPUT_SOURCE, byteValue) || byteValue > SRC_MAX) return false;
   candidate.source = (InputSource)byteValue;
 
   if (!getExactFloat(REQ_GET_USER_VOLUME, candidate.volumeDb) ||
@@ -7718,7 +7750,7 @@ bool setUserMuteVerified(bool enabled, uint8_t attempts = 4)
 
 bool setInputSource(InputSource source, bool userInitiated)
 {
-  if ((uint8_t)source > (uint8_t)SRC_OPTICAL_3 || !inputSourceAvailable(source)) return false;
+  if ((uint8_t)source > SRC_MAX || !inputSourceAvailable(source)) return false;
   // User Volume is not changed here. The boolean is retained only to label
   // a deliberate user source selection in the deferred state-refresh log.
   if (!dspiSetByte(REQ_SET_INPUT_SOURCE, (uint8_t)source)) return false;
@@ -7730,7 +7762,7 @@ bool setInputSource(InputSource source, bool userInitiated)
   bool confirmed = false;
   do {
     if (getExactByte(REQ_GET_INPUT_SOURCE, readback) &&
-        readback <= SRC_OPTICAL_3 && readback == (uint8_t)source) {
+        readback <= SRC_MAX && readback == (uint8_t)source) {
       confirmed = true;
       break;
     }
@@ -7796,7 +7828,7 @@ bool restoreDspiMediaRoute()
 
     uint8_t liveSource = 0xFF;
     bool sourceRead = getExactByte(REQ_GET_INPUT_SOURCE, liveSource) &&
-                      liveSource <= SRC_OPTICAL_3;
+                      liveSource <= SRC_MAX;
     if (!sourceRead || liveSource != mediaRoute.source) {
       commandsOk = setInputSource(mediaRoute.source, false) && commandsOk;
     } else {
@@ -7942,7 +7974,7 @@ bool activateDspiMediaRoute(uint32_t sampleRate, bool userInitiated)
   }
   uint8_t liveSource = 0xFF;
   bool sourceKnown = getExactByte(REQ_GET_INPUT_SOURCE, liveSource) &&
-                     liveSource <= SRC_OPTICAL_3;
+                     liveSource <= SRC_MAX;
   if (!selectedVerified ||
       ((!sourceKnown || liveSource != SRC_I2S) &&
        !setInputSource(SRC_I2S, userInitiated))) {
@@ -7994,7 +8026,7 @@ bool prepareDspiMediaRoute(uint32_t sampleRate, bool userInitiated)
         !getExactByte(REQ_GET_I2S_CLOCK_MODE, clockMode) ||
         !getExactByte(REQ_GET_I2S_RX_PIN, rxPin, 0) ||
         !getExactByte(REQ_GET_INPUT_SOURCE, source) ||
-        source > SRC_OPTICAL_3) {
+        source > SRC_MAX) {
       Serial.println("MEDIA ROUTE: failed to capture DSPi configuration");
       return false;
     }
@@ -9514,7 +9546,7 @@ bool loadPreset(uint8_t slot)
     activeConfirmed = true;
     if (!mediaWasActive || !mediaRoute.captured) break;
     if (getExactByte(REQ_GET_INPUT_SOURCE, restoredSource) &&
-        restoredSource <= SRC_OPTICAL_3 &&
+        restoredSource <= SRC_MAX &&
         getExactByte(REQ_GET_I2S_CLOCK_MODE, restoredClockMode) &&
         getDspiInputRates(currentRate, selectedRate)) {
       break;
@@ -16596,11 +16628,14 @@ void setup()
   dspi.psybassCharacterPct = 50.0f;
   dspi.psybassOriginalDb = 0.0f;
   dspi.sampleRate = 48000;
-  dspi.spdifInputCount = 3;
+  // Pre-sync placeholders; the first syncCurrentState() overwrites them with
+  // whatever the attached firmware actually reports.
+  dspi.spdifInputCount = PANEL_MAX_SPDIF_INPUTS;
   dspi.spdifOptionalEnableMask = 0;
   dspi.spdifPins[0] = 5;
   dspi.spdifPins[1] = 20;
   dspi.spdifPins[2] = 21;
+  dspi.spdifPins[3] = 22;
   dspi.adatInputEnabled = false;
   dspi.adatInputPin = 0xFF;
   strncpy(dspi.presetNames[0], "Default",
