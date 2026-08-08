@@ -2,24 +2,23 @@
 
 ESP32-S3 front panel for WeebLabs DSPi with rotary encoder control, BLE remote learning, source and DSP feature menus, stereo bar meters, analogue VU display, SD-card music playback and Wi-Fi Music Transfer.
 
-## Version 1.1.3
+## Version 1.2.0
 
-Version 1.1.3 is the public compatibility update for DSPi firmware v1.1.5. It adds the fourth selectable S/PDIF input while retaining the music-player, Wi-Fi transfer and control-panel features introduced in v1.1.2.
+Version 1.2.0 is the VU IMP interface, preset and playback-reliability release. It retains DSPi firmware v1.1.5/V28 compatibility, including four selectable S/PDIF inputs, while substantially expanding the front-panel theme and control experience.
 
 ### Main changes
 
-- Supports the four-input S/PDIF inventory reported by DSPi firmware v1.1.5.
-- Adds S/PDIF 4 as input-source value 6 when it is enabled by DSPi.
-- Accepts both the older three-input and current four-input `0xEF` responses.
-- Keeps source validation, preset restoration and media-route restoration aligned with the expanded source enum.
-- WAV, FLAC and MP3 playback from microSD.
-- Folder and album browsing with artwork support.
-- Play, pause, seek, previous/next track and automatic track advance.
-- Browser-based Wi-Fi upload, folder creation and file/folder deletion.
-- Playback-safe SD operation for long listening sessions.
-- Existing preset, volume-limit, display, VU-meter and BLE remote features remain available.
+- Independent Main Text, Accent, Volume Meters and Analog VU colour roles.
+- Thirty-colour text/meter palette plus six shaded analogue VU face choices.
+- Cached custom analogue faces for cyan-speed needle animation without changing the approved artwork or calibration.
+- Reworked System, Screen, Idle Screen, Theme and ten-slot Preset list interfaces.
+- Five-second Select hold saves a complete DSPi/panel preset; normal selection remains in the preset list.
+- Confirmed DSPi Console changes update the Home state and use the same full-screen notifications as local controls.
+- Music playback uses the normal I2S Home state, with automatic route ownership and reliable 44.1/48 kHz operation.
+- Hardened 48 kHz decoder scheduling, BLE reconnect deferral, background-artwork limits and underrun telemetry.
+- Preserves the v1.1.3 S/PDIF 4 compatibility, Wi-Fi Music Transfer, BLE remote and SD music-player features.
 
-See [CHANGELOG-v1.1.3.md](CHANGELOG-v1.1.3.md) for the concise release summary.
+See [CHANGELOG-v1.2.0.md](CHANGELOG-v1.2.0.md) for the complete release summary and firmware checksums.
 
 ## Hardware
 
@@ -31,7 +30,7 @@ See [CHANGELOG-v1.1.3.md](CHANGELOG-v1.1.3.md) for the concise release summary.
 
 ## DSPi compatibility
 
-- DSPi firmware v1.1.5: four S/PDIF inputs are supported.
+- DSPi firmware v1.1.5/V28 and compatible v1.1.6 beta builds: four S/PDIF inputs and verified runtime notifications are supported.
 - Earlier compatible DSPi firmware: the fourth S/PDIF source remains hidden when only three inputs are reported.
 
 ## Wiring
@@ -59,14 +58,14 @@ Power encoder modules from 3.3 V, not 5 V.
 
 ## Flash on Windows
 
-1. Download the v1.1.3 release source or clone `main`.
+1. Download the v1.2.0 release source or clone `main`.
 2. Install Python 3 if `py --version` does not show a version.
 3. Connect the ESP32-S3-LCD-2 by USB.
 4. Close Arduino Serial Monitor and any program using the COM port.
 5. Open PowerShell in the project folder and run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.3.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.2.0.ps1"
 ```
 
 The script asks for or uses the supplied COM port, installs the required build tools when needed, compiles the firmware and performs a clean flash.
@@ -74,7 +73,7 @@ The script asks for or uses the supplied COM port, installs the required build t
 To update only the application while preserving BLE pairing and panel settings:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.1.3.ps1" -PreserveSettings
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.2.0.ps1" -PreserveSettings
 ```
 
 A clean flash erases BLE pairing, learned key mappings, brightness, screen-power settings and shortcut assignments. After a clean flash, disconnect all power for at least 10 seconds before reconnecting.
@@ -84,7 +83,7 @@ A clean flash erases BLE pairing, learned key mappings, brightness, screen-power
 Run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.1.3.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.2.0.ps1"
 ```
 
 The script installs or verifies:
@@ -94,13 +93,13 @@ The script installs or verifies:
 - NimBLE-Arduino 2.5.0
 - SdFat 2.3.0
 
-The Arduino sketch retains its historical v1.1.2 directory name so the existing Arduino project and patch preparation remain stable:
+The Arduino sketch retains its historical v1.1.2 directory name so the existing Arduino project and release history remain stable:
 
 ```text
 firmware\DSPi_ESP32_Front_Panel_v1_1_2\DSPi_ESP32_Front_Panel_v1_1_2.ino
 ```
 
-The v1.1.3 wrappers build and name the release artifacts as v1.1.3.
+The v1.2.0 wrappers build and name the release artifacts as v1.2.0.
 
 Board profile:
 

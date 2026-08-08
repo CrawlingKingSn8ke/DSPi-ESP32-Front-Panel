@@ -24,12 +24,10 @@
 
 namespace {
 
-// Shared 30 MHz completed a full 16 MiB write and byte-for-byte readback
-// on the target hardware. Keep lower clocks as automatic compatibility
-// fallbacks. The existing live-mount ownership handoff is retained so Wi-Fi
-// Transfer does not reintroduce the proven SdFat/SPI teardown failure.
+// Playback uses a conservative shared-SPI clock with automatic lower-speed
+// fallbacks for card compatibility.
 constexpr uint32_t kSdFrequenciesHz[] = {
-  30000000, 20000000, 10000000, 4000000
+  20000000, 10000000, 4000000
 };
 constexpr uint8_t kSdMountAttemptsPerFrequency = 2;
 constexpr uint32_t kSpiLockTimeoutMs = 2000;
@@ -44,10 +42,20 @@ constexpr size_t kSeekPrefillFrames = 8192;
 constexpr uint32_t kMinimumPsramBandwidthTenthsMiB = 40;  // 4.0 MiB/s.
 constexpr UBaseType_t kDecoderTaskPriority = 3;
 constexpr UBaseType_t kOutputTaskPriority = 4;
+// Bluetooth controller and NimBLE host work use high-priority CPU0 tasks.
+// Keep both audio tasks on CPU1: i2s_channel_write() blocks while DMA drains,
+// allowing the next-lower-priority decoder to refill without competing with
+// BLE scans. The output task always preempts decoding when DMA needs data.
+constexpr BaseType_t kAudioTaskCore = 1;
 constexpr size_t kTailSilenceFrames = 512;
 constexpr uint32_t kTaskStopTimeoutMs = 3000;
 constexpr uint32_t kSeekQuiesceTimeoutMs = 750;
 constexpr uint32_t kSeekPrefillTimeoutMs = 2500;
+// Keep decoder I/O cooperative with the other front-panel tasks.
+constexpr uint32_t kDecoderIoYieldIntervalMs = 20;
+constexpr uint32_t kDecoderSlowReadThresholdMs = 100;
+// Use bounded SD read slices so display and control tasks remain responsive.
+constexpr size_t kDecoderReadSliceBytes = 1024;
 constexpr uint32_t kDecoderTaskStackBytes = 32768;
 constexpr uint32_t kSeekMinimumFreeStackBytes = 8192;
 constexpr EventBits_t kSeekActiveBit = BIT0;
@@ -61,6 +69,8 @@ static_assert((kPreferredRingFrames & (kPreferredRingFrames - 1)) == 0,
               "Preferred PCM ring frame count must be a power of two");
 static_assert((kFallbackRingFrames & (kFallbackRingFrames - 1)) == 0,
               "Fallback PCM ring frame count must be a power of two");
+static_assert(kOutputTaskPriority > kDecoderTaskPriority,
+              "I2S output must always preempt media decoding");
 
 SemaphoreHandle_t sharedSpiMutex()
 {
@@ -386,16 +396,132 @@ bool readNativeFlacStreamInfo(MediaFsFile &file, uint64_t streamOffset,
   return info.valid;
 }
 
+struct DecoderReadTelemetry {
+  MediaPlaybackStats *stats = nullptr;
+  uint32_t lastYieldAt = 0;
+  bool ioErrorCounted = false;
+};
+
 struct DecoderIoContext {
   MediaFsFile *file = nullptr;
   volatile bool *cancelRequested = nullptr;
+  DecoderReadTelemetry readTelemetry;
 };
 
 struct FlacStreamContext {
   MediaFsFile *file = nullptr;
   volatile bool *cancelRequested = nullptr;
   uint64_t baseOffset = 0;
+  DecoderReadTelemetry readTelemetry;
 };
+
+void updateAtomicMaximum(uint32_t *target, uint32_t value)
+{
+  if (!target) return;
+  uint32_t observed = __atomic_load_n(target, __ATOMIC_RELAXED);
+  while (value > observed &&
+         !__atomic_compare_exchange_n(target, &observed, value, false,
+                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+}
+
+void updateAtomicMinimum(uint32_t *target, uint32_t value)
+{
+  if (!target) return;
+  uint32_t observed = __atomic_load_n(target, __ATOMIC_RELAXED);
+  while (value < observed &&
+         !__atomic_compare_exchange_n(target, &observed, value, false,
+                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+}
+
+size_t cooperativeDecoderRead(MediaFsFile *file,
+                              volatile bool *cancelRequested,
+                              DecoderReadTelemetry &telemetry,
+                              void *output, size_t bytesToRead)
+{
+  if (!file || !*file || !output || bytesToRead == 0 ||
+      (cancelRequested && *cancelRequested)) {
+    return 0;
+  }
+
+  // Once an I/O error is reported, stop issuing reads from this decoder.
+  if (file->hadIoError()) {
+    if (telemetry.stats && !telemetry.ioErrorCounted) {
+      __atomic_add_fetch(&telemetry.stats->sdReadErrors, 1U,
+                         __ATOMIC_RELAXED);
+      telemetry.ioErrorCounted = true;
+    }
+    if (telemetry.stats) {
+      __atomic_add_fetch(&telemetry.stats->sdReadYields, 1U,
+                         __ATOMIC_RELAXED);
+    }
+    vTaskDelay(1);
+    telemetry.lastYieldAt = millis();
+    return 0;
+  }
+
+  uint8_t *destination = static_cast<uint8_t *>(output);
+  size_t totalRead = 0;
+  const uint32_t callbackStartedAt = millis();
+
+  while (totalRead < bytesToRead &&
+         !(cancelRequested && *cancelRequested) && !file->hadIoError()) {
+    const size_t sliceRequest =
+        std::min(kDecoderReadSliceBytes, bytesToRead - totalRead);
+    const uint32_t sliceStartedAt = millis();
+    size_t sliceRead = 0;
+    {
+      SharedSpiGuard guard;
+      if (!(cancelRequested && *cancelRequested) && !file->hadIoError()) {
+        sliceRead = file->read(destination + totalRead, sliceRequest);
+      }
+    }
+
+    const uint32_t sliceElapsedMs = millis() - sliceStartedAt;
+    if (telemetry.stats) {
+      __atomic_add_fetch(&telemetry.stats->sdReadSlices, 1U,
+                         __ATOMIC_RELAXED);
+      updateAtomicMaximum(&telemetry.stats->sdReadSliceMaxMs,
+                          sliceElapsedMs);
+    }
+    totalRead += sliceRead;
+
+    const bool ioError = file->hadIoError();
+    if (ioError && telemetry.stats && !telemetry.ioErrorCounted) {
+      __atomic_add_fetch(&telemetry.stats->sdReadErrors, 1U,
+                         __ATOMIC_RELAXED);
+      telemetry.ioErrorCounted = true;
+    }
+
+    // Delay outside the shared-SPI guard after slow or failed reads, and at
+    // regular intervals, so lower-priority system tasks can run.
+    const uint32_t now = millis();
+    if (ioError || sliceRead == 0 ||
+        sliceElapsedMs >= kDecoderIoYieldIntervalMs ||
+        (uint32_t)(now - telemetry.lastYieldAt) >=
+            kDecoderIoYieldIntervalMs) {
+      if (telemetry.stats) {
+        __atomic_add_fetch(&telemetry.stats->sdReadYields, 1U,
+                           __ATOMIC_RELAXED);
+      }
+      vTaskDelay(1);
+      telemetry.lastYieldAt = millis();
+    }
+
+    if (sliceRead < sliceRequest || ioError) break;
+  }
+
+  const uint32_t callbackElapsedMs = millis() - callbackStartedAt;
+  if (telemetry.stats) {
+    __atomic_add_fetch(&telemetry.stats->sdReadCalls, 1U,
+                       __ATOMIC_RELAXED);
+    updateAtomicMaximum(&telemetry.stats->sdReadMaxMs, callbackElapsedMs);
+    if (callbackElapsedMs >= kDecoderSlowReadThresholdMs) {
+      __atomic_add_fetch(&telemetry.stats->sdSlowReads, 1U,
+                         __ATOMIC_RELAXED);
+    }
+  }
+  return totalRead;
+}
 
 struct ArtworkLocation {
   char path[MEDIA_FS_PATH_CAPACITY] = {0};
@@ -820,13 +946,9 @@ bool readArtworkLocation(const ArtworkLocation &location, uint8_t **data,
 size_t decoderRead(void *context, void *output, size_t bytesToRead)
 {
   DecoderIoContext *io = static_cast<DecoderIoContext *>(context);
-  if (!io || !io->file || !*io->file ||
-      (io->cancelRequested && *io->cancelRequested)) {
-    return 0;
-  }
-  SharedSpiGuard guard;
-  if (io->cancelRequested && *io->cancelRequested) return 0;
-  return io->file->read(static_cast<uint8_t *>(output), bytesToRead);
+  if (!io) return 0;
+  return cooperativeDecoderRead(io->file, io->cancelRequested,
+                                io->readTelemetry, output, bytesToRead);
 }
 
 drwav_bool32 wavSeek(void *context, int offset, drwav_seek_origin origin)
@@ -855,11 +977,9 @@ drwav_bool32 wavTell(void *context, drwav_int64 *cursor)
 size_t flacRead(void *context, void *output, size_t bytesToRead)
 {
   FlacStreamContext *stream = static_cast<FlacStreamContext *>(context);
-  if (!stream || !stream->file || !*stream->file ||
-      (stream->cancelRequested && *stream->cancelRequested)) return 0;
-  SharedSpiGuard guard;
-  if (stream->cancelRequested && *stream->cancelRequested) return 0;
-  return stream->file->read(static_cast<uint8_t *>(output), bytesToRead);
+  if (!stream) return 0;
+  return cooperativeDecoderRead(stream->file, stream->cancelRequested,
+                                stream->readTelemetry, output, bytesToRead);
 }
 
 drflac_bool32 flacSeek(void *context, int offset, drflac_seek_origin origin)
@@ -1244,6 +1364,21 @@ bool MediaPlayerPoC::mountCardWithMode(MediaFsAccessMode accessMode,
     mountedCardType = MEDIA_CARD_NONE;
     mountedCardSizeBytes = 0;
     mountedFrequencyHz = 0;
+  }
+  if (!cardMounted && mediaFs.mounted() && storageIoFault) {
+    // A decoder-side I/O fault is not a deliberate unmount. Keep the panel
+    // responsive, quarantine the stale mount and request a full power cycle.
+    browserDirectoryScratch.close();
+    browserEntryScratch.close();
+    strlcpy(errorText, "SD read fault; power cycle required",
+            sizeof(errorText));
+    Serial.printf(
+        "MEDIA SD: faulted mount quarantined clock=%lu Hz code=0x%02X "
+        "data=0x%08lX; power cycle required\n",
+        static_cast<unsigned long>(mountedFrequencyHz),
+        static_cast<unsigned>(mediaFs.errorCode()),
+        static_cast<unsigned long>(mediaFs.errorData()));
+    return false;
   }
   if (!cardMounted && mediaFs.mounted()) {
     TrySharedSpiGuard guard(lockTimeoutMs);
@@ -2018,7 +2153,9 @@ bool MediaPlayerPoC::openDecoderState(const char *path, DecoderState *&target,
 
   target->io.file = &target->file;
   target->io.cancelRequested = &stopRequested;
+  target->io.readTelemetry.stats = &stats;
   target->flacStream.cancelRequested = &stopRequested;
+  target->flacStream.readTelemetry.stats = &stats;
 
   info = MediaFileInfo{};
   if (endsWithIgnoreCase(path, ".wav")) {
@@ -2268,6 +2405,29 @@ void MediaPlayerPoC::publishSeekEvent(MediaSeekResult result,
   xQueueOverwrite(seekEventQueue, &event);
 }
 
+void MediaPlayerPoC::reportStorageReadFault(const char *stage)
+{
+  // Use cached metadata so fault reporting does not wait on the shared bus.
+  uint64_t position = 0;
+  uint64_t size = 0;
+  if (decoder && decoder->file) {
+    position = decoder->file.position();
+    size = decoder->file.size();
+  }
+  const uint8_t errorCode = mediaFs.errorCode();
+  const uint32_t errorData = mediaFs.errorData();
+  Serial.printf(
+      "MEDIA SD FAULT: stage=%s path=%s position=%llu size=%llu "
+      "clock=%lu Hz code=0x%02X data=0x%08lX\n",
+      stage ? stage : "unknown",
+      currentPath[0] ? currentPath : "(none)",
+      static_cast<unsigned long long>(position),
+      static_cast<unsigned long long>(size),
+      static_cast<unsigned long>(mountedFrequencyHz),
+      static_cast<unsigned>(errorCode),
+      static_cast<unsigned long>(errorData));
+}
+
 bool MediaPlayerPoC::prefillAfterSeek()
 {
   if (!decoder) return false;
@@ -2281,6 +2441,7 @@ bool MediaPlayerPoC::prefillAfterSeek()
     updateTaskStackWatermark(true);
     if (frames == 0) {
       if (storageIoFault) {
+        reportStorageReadFault("seek-prefill");
         cardMounted = false;
         setError("SD read failed or card removed");
         stopRequested = true;
@@ -2651,6 +2812,7 @@ size_t MediaPlayerPoC::decodeFramesFrom(
   if (!stereoOutput || maximumFrames == 0) return 0;
   maximumFrames = std::min(maximumFrames, kDecodeChunkFrames);
 
+  const uint32_t decodeStartedAt = millis();
   size_t framesRead = 0;
   if (source.wavOpen) {
     framesRead = (size_t)drwav_read_pcm_frames_s32(
@@ -2661,6 +2823,11 @@ size_t MediaPlayerPoC::decodeFramesFrom(
   } else if (source.mp3Open) {
     framesRead = (size_t)drmp3_read_pcm_frames_s16(
         &source.mp3, maximumFrames, source.s16);
+  }
+  const uint32_t decodeElapsedMs = millis() - decodeStartedAt;
+  updateAtomicMaximum(&stats.decoderCallMaxMs, decodeElapsedMs);
+  if (decodeElapsedMs >= kDecoderIoYieldIntervalMs) {
+    vTaskDelay(1);
   }
 
   if (framesRead == 0 && source.file.hadIoError()) {
@@ -3023,6 +3190,7 @@ MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
       size_t frames = decodeFrames(decoder->stereo, request);
       if (frames == 0) {
         if (storageIoFault) {
+          reportStorageReadFault("start-prefill");
           cardMounted = false;
           closeDecoder();
           resetRing();
@@ -3094,9 +3262,10 @@ MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
 
   state = MediaPlaybackState::Playing;
   startStage = StartStage::Idle;
+  stats.ringLowWaterFrames = (uint32_t)ringAvailable();
   BaseType_t created = xTaskCreatePinnedToCore(
       decoderTaskEntry, "media-decode", kDecoderTaskStackBytes, this,
-      kDecoderTaskPriority, &decoderTaskHandle, 0);
+      kDecoderTaskPriority, &decoderTaskHandle, kAudioTaskCore);
   if (created != pdPASS) {
     stop();
     setError("decoder task creation failed");
@@ -3107,7 +3276,7 @@ MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
 
   created = xTaskCreatePinnedToCore(
       outputTaskEntry, "media-i2s", 8192, this, kOutputTaskPriority,
-      &outputTaskHandle, 1);
+      &outputTaskHandle, kAudioTaskCore);
   if (created != pdPASS) {
     stop();
     setError("I2S output task creation failed");
@@ -3373,15 +3542,22 @@ void MediaPlayerPoC::printPlaybackStatus(Stream &out) const
   MediaPlaybackStats snapshot = playbackStats();
   out.printf(
       "MEDIA STATUS: state=%s format=%s rate=%lu depth=%u channels=%u "
-      "decoded=%llu output=%llu ring=%u/%u underrun=%lu "
+      "decoded=%llu output=%llu ring=%u/%u underrun=%lu events=%lu "
+      "longest_underrun=%lu last_underrun_ms=%lu lowwater=%lu "
       "i2s_timeout=%lu i2s_error=%lu highwater=%lu "
       "dec_stack_free=%lu out_stack_free=%lu seek=%lu/%lu/%lu "
-      "seek_ms=%lu path=%s",
+      "seek_ms=%lu sd_cb=%lu sd_slices=%lu sd_slow=%lu sd_err=%lu "
+      "sd_yield=%lu cb_max_ms=%lu slice_max_ms=%lu "
+      "decode_max_ms=%lu path=%s",
       stateName(state), formatName(currentFile.format),
       (unsigned long)currentFile.sampleRate, currentFile.bitsPerSample,
       currentFile.channels, (unsigned long long)snapshot.decodedFrames,
       (unsigned long long)snapshot.outputFrames, (unsigned)ringAvailable(),
       (unsigned)ringFrameCapacity, (unsigned long)snapshot.underrunFrames,
+      (unsigned long)snapshot.underrunEvents,
+      (unsigned long)snapshot.longestUnderrunFrames,
+      (unsigned long)snapshot.lastUnderrunAtMs,
+      (unsigned long)snapshot.ringLowWaterFrames,
       (unsigned long)snapshot.i2sTimeouts,
       (unsigned long)snapshot.i2sErrors,
       (unsigned long)snapshot.ringHighWaterFrames,
@@ -3391,6 +3567,14 @@ void MediaPlayerPoC::printPlaybackStatus(Stream &out) const
       (unsigned long)snapshot.seekCompleted,
       (unsigned long)snapshot.seekFailed,
       (unsigned long)snapshot.lastSeekElapsedMs,
+      (unsigned long)snapshot.sdReadCalls,
+      (unsigned long)snapshot.sdReadSlices,
+      (unsigned long)snapshot.sdSlowReads,
+      (unsigned long)snapshot.sdReadErrors,
+      (unsigned long)snapshot.sdReadYields,
+      (unsigned long)snapshot.sdReadMaxMs,
+      (unsigned long)snapshot.sdReadSliceMaxMs,
+      (unsigned long)snapshot.decoderCallMaxMs,
       currentPath[0] ? currentPath : "(none)");
   if (state == MediaPlaybackState::Error && errorText[0]) {
     out.printf(" error=%s", errorText);
@@ -3422,12 +3606,20 @@ MediaPlaybackStats MediaPlayerPoC::playbackStats() const
       __atomic_load_n(&stats.outputFrames, __ATOMIC_ACQUIRE);
   snapshot.underrunFrames =
       __atomic_load_n(&stats.underrunFrames, __ATOMIC_ACQUIRE);
+  snapshot.underrunEvents =
+      __atomic_load_n(&stats.underrunEvents, __ATOMIC_ACQUIRE);
+  snapshot.longestUnderrunFrames =
+      __atomic_load_n(&stats.longestUnderrunFrames, __ATOMIC_ACQUIRE);
+  snapshot.lastUnderrunAtMs =
+      __atomic_load_n(&stats.lastUnderrunAtMs, __ATOMIC_ACQUIRE);
   snapshot.i2sTimeouts =
       __atomic_load_n(&stats.i2sTimeouts, __ATOMIC_ACQUIRE);
   snapshot.i2sErrors =
       __atomic_load_n(&stats.i2sErrors, __ATOMIC_ACQUIRE);
   snapshot.ringHighWaterFrames =
       __atomic_load_n(&stats.ringHighWaterFrames, __ATOMIC_ACQUIRE);
+  snapshot.ringLowWaterFrames =
+      __atomic_load_n(&stats.ringLowWaterFrames, __ATOMIC_ACQUIRE);
   snapshot.decoderStackMinFree =
       __atomic_load_n(&stats.decoderStackMinFree, __ATOMIC_ACQUIRE);
   snapshot.outputStackMinFree =
@@ -3440,6 +3632,22 @@ MediaPlaybackStats MediaPlayerPoC::playbackStats() const
       __atomic_load_n(&stats.seekFailed, __ATOMIC_ACQUIRE);
   snapshot.lastSeekElapsedMs =
       __atomic_load_n(&stats.lastSeekElapsedMs, __ATOMIC_ACQUIRE);
+  snapshot.sdReadCalls =
+      __atomic_load_n(&stats.sdReadCalls, __ATOMIC_ACQUIRE);
+  snapshot.sdReadSlices =
+      __atomic_load_n(&stats.sdReadSlices, __ATOMIC_ACQUIRE);
+  snapshot.sdSlowReads =
+      __atomic_load_n(&stats.sdSlowReads, __ATOMIC_ACQUIRE);
+  snapshot.sdReadErrors =
+      __atomic_load_n(&stats.sdReadErrors, __ATOMIC_ACQUIRE);
+  snapshot.sdReadYields =
+      __atomic_load_n(&stats.sdReadYields, __ATOMIC_ACQUIRE);
+  snapshot.sdReadMaxMs =
+      __atomic_load_n(&stats.sdReadMaxMs, __ATOMIC_ACQUIRE);
+  snapshot.sdReadSliceMaxMs =
+      __atomic_load_n(&stats.sdReadSliceMaxMs, __ATOMIC_ACQUIRE);
+  snapshot.decoderCallMaxMs =
+      __atomic_load_n(&stats.decoderCallMaxMs, __ATOMIC_ACQUIRE);
   return snapshot;
 }
 
@@ -3492,6 +3700,7 @@ void MediaPlayerPoC::decoderTask()
     updateTaskStackWatermark(true);
     if (frames == 0) {
       if (storageIoFault && !stopRequested) {
+        reportStorageReadFault("decoder");
         cardMounted = false;
         setError("SD read failed or card removed");
         stopRequested = true;
@@ -3554,6 +3763,8 @@ void MediaPlayerPoC::outputTask()
   };
 
   bool naturalEnd = false;
+  bool underrunActive = false;
+  uint32_t underrunRunFrames = 0;
   updateTaskStackWatermark(false);
   while (!stopRequested) {
     EventBits_t control = mediaControlEvents
@@ -3587,12 +3798,28 @@ void MediaPlayerPoC::outputTask()
         break;
       }
       memset(output, 0, sizeof(output));
+      if (!underrunActive) {
+        underrunActive = true;
+        underrunRunFrames = 0;
+        __atomic_add_fetch(&stats.underrunEvents, 1U, __ATOMIC_RELAXED);
+      }
+      underrunRunFrames += (uint32_t)kOutputChunkFrames;
       __atomic_add_fetch(&stats.underrunFrames,
                          (uint32_t)kOutputChunkFrames,
                          __ATOMIC_RELAXED);
+      __atomic_store_n(&stats.lastUnderrunAtMs, millis(), __ATOMIC_RELAXED);
+      updateAtomicMaximum(&stats.longestUnderrunFrames,
+                          underrunRunFrames);
       if (!sendFrames(output, kOutputChunkFrames)) break;
       updateTaskStackWatermark(false);
       continue;
+    }
+
+    underrunActive = false;
+    underrunRunFrames = 0;
+    if (!decoderComplete) {
+      updateAtomicMinimum(&stats.ringLowWaterFrames,
+                          (uint32_t)ringAvailable());
     }
 
     if (!sendFrames(output, frames)) break;

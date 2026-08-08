@@ -93,13 +93,18 @@ const char *MediaFsFile::name() const
 
 size_t MediaFsFile::read(uint8_t *buffer, size_t length)
 {
-  if (!buffer || length == 0 || !file_.isOpen()) return 0;
+  if (!buffer || length == 0 || !file_.isOpen() || ioError_) return 0;
   int result = file_.read(buffer, length);
   if (result < 0) {
     ioError_ = true;
     return 0;
   }
-  if (result == 0 && file_.curPosition() < file_.fileSize()) {
+
+  // A short read is normal only when it reaches the known end of the file.
+  // Treat any other partial result as a persistent I/O error so decoder
+  // callbacks cannot repeatedly re-enter the same failed SdFat transaction.
+  if (static_cast<size_t>(result) < length &&
+      file_.curPosition() < file_.fileSize()) {
     ioError_ = true;
   }
   return result > 0 ? static_cast<size_t>(result) : 0;
@@ -107,7 +112,7 @@ size_t MediaFsFile::read(uint8_t *buffer, size_t length)
 
 int MediaFsFile::read()
 {
-  if (!file_.isOpen()) return -1;
+  if (!file_.isOpen() || ioError_) return -1;
   int result = file_.read();
   if (result < 0 && file_.curPosition() < file_.fileSize()) ioError_ = true;
   return result;

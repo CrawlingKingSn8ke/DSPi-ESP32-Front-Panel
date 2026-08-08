@@ -44,15 +44,27 @@ struct MediaPlaybackStats {
   uint64_t decodedFrames = 0;
   uint64_t outputFrames = 0;
   uint32_t underrunFrames = 0;
+  uint32_t underrunEvents = 0;
+  uint32_t longestUnderrunFrames = 0;
+  uint32_t lastUnderrunAtMs = 0;
   uint32_t i2sTimeouts = 0;
   uint32_t i2sErrors = 0;
   uint32_t ringHighWaterFrames = 0;
+  uint32_t ringLowWaterFrames = 0;
   uint32_t decoderStackMinFree = 0;
   uint32_t outputStackMinFree = 0;
   uint32_t seekRequests = 0;
   uint32_t seekCompleted = 0;
   uint32_t seekFailed = 0;
   uint32_t lastSeekElapsedMs = 0;
+  uint32_t sdReadCalls = 0;
+  uint32_t sdReadSlices = 0;
+  uint32_t sdSlowReads = 0;
+  uint32_t sdReadErrors = 0;
+  uint32_t sdReadYields = 0;
+  uint32_t sdReadMaxMs = 0;
+  uint32_t sdReadSliceMaxMs = 0;
+  uint32_t decoderCallMaxMs = 0;
 };
 
 enum class MediaSeekResult : uint8_t {
@@ -256,6 +268,7 @@ private:
                 int8_t dataOutPin);
   void stopI2s();
   void setError(const char *message);
+  void reportStorageReadFault(const char *stage);
 
   static void decoderTaskEntry(void *context);
   static void outputTaskEntry(void *context);

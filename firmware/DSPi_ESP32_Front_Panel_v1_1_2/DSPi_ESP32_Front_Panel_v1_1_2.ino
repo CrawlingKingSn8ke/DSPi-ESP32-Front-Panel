@@ -15,7 +15,7 @@
   - BLE HID/proprietary remote search, pairing, automatic reconnect and button learning
   - BLE remote profile and key mappings stored in ESP32 NVS (no SD card)
   - Interrupt-driven rotary encoder capture prevents lost/reversed volume steps
-  - Two physical encoder notches equal one menu step; volume remains 0.5 dB per notch
+  - Two physical encoder notches equal one menu step; volume changes 1 dB per notch
   - Aligned Remote menu naming, single Pairing label and animated turquoise spinner
   - Multi-service BLE input subscriptions for remotes such as Amazon Fire TV
   - HID Report Reference identity retained in learned button mappings
@@ -42,7 +42,7 @@
   - Save Current captures the active DSPi preset through the native 0x90 command
   - Global Volume Limit is persisted through DSPi independent storage
   - Large confirmed preset and input change screens for distance viewing
-  - Screen timeout, dim level and brightness settings with non-blocking wake/dim fades
+  - Screen timeout actions: dim, screen off, digital VU or analogue VU
   - Complete six-source beta5 Input editor with verified dynamic availability
   - S/PDIF 1/2/3 and ADAT lock/rate status from exact protocol responses
   - Approved analogue combined-peak VU page after the unchanged stereo VU
@@ -141,6 +141,8 @@
 #define MEDIA_ARTWORK_MIN_RING_PERCENT 95
 #define MEDIA_ARTWORK_IO_RESUME_PERCENT 92
 #define MEDIA_LOW_RING_PERCENT    25
+#define MEDIA_BROWSER_MIN_RING_PERCENT 80
+#define MEDIA_BROWSER_REDRAW_MS   180
 #define MEDIA_ARTWORK_TASK_STACK 12288
 #define MEDIA_SEEK_HOLD_MS       550
 #define MEDIA_SEEK_RAMP_MS       500
@@ -179,10 +181,16 @@
 #define DSPI_RECOVERY_QUIET_MS 12
 #define DSPI_NOTIFICATION_REFRESH_MS 250
 #define CHANGE_OVERLAY_MS 1800
+#define PRESET_INPUT_CHANGE_OVERLAY_MS 3200
 #define PRESET_SAVE_REFRESH_MS 350
 #define SCREEN_FADE_MS 320
+#define SCREEN_TIMEOUT_VU_POLL_MS 180
+#define SCREEN_TIMEOUT_VU_SPI_TRY_MS 4
+#define SCREEN_TIMEOUT_VU_STABLE_MS 750
+#define SCREEN_TIMEOUT_VU_RETRY_MS 250
 #define ENCODER_DEBOUNCE_MS 25
 #define ENCODER_LONG_PRESS_MS 750
+#define PRESET_SAVE_HOLD_MS 5000
 #define ENCODER_VISUALIZER_HOLD_MS 5000
 #define ENCODER_COUNTS_PER_DETENT 2
 #define ENCODER_MENU_DETENTS_PER_STEP 2
@@ -250,7 +258,6 @@ MediaPlayerPoC mediaPlayerPoc;
 
 #define C_BLACK        0x0000
 #define C_WHITE        0xFFFF
-#define C_DIM          0x7BEF
 #define C_LINE         0x31A6
 #define C_CYAN         0x7EFC
 #define C_CYAN_SOFT    0x4DFF
@@ -261,6 +268,13 @@ MediaPlayerPoC mediaPlayerPoc;
 #define C_ORANGE       0xFCE0
 #define C_RED          0xF9A6
 #define C_SHADOW       0x10A2
+#define C_THEME_BLUE   0x5D9F
+#define C_THEME_GREEN  0x7FE0
+#define C_THEME_AMBER  0xFD04  // warm honey-gold amber, like a classic amplifier
+#define C_THEME_PINK   0xFCDF
+#define C_THEME_RED    0xF800
+#define C_THEME_YELLOW 0xFFE0
+#define C_WARM_WHITE   0xFF9C
 
 struct GlyphDef {
   char ch;
@@ -5218,7 +5232,155 @@ enum MenuPage {
   PAGE_BLUETOOTH,
   PAGE_SYSTEM,
   PAGE_MEDIA_SETTINGS,
-  PAGE_SCREEN_SETTINGS
+  PAGE_SCREEN_SETTINGS,
+  PAGE_IDLE_SCREEN,
+  PAGE_THEME
+};
+
+enum LegacyUiColourChoice : uint8_t {
+  UI_COLOUR_WHITE = 0,
+  UI_COLOUR_CYAN = 1,
+  UI_COLOUR_BLUE = 2,
+  UI_COLOUR_GREEN = 3,
+  UI_COLOUR_AMBER = 4,
+  UI_COLOUR_MAGENTA = 5,
+  UI_COLOUR_RED = 6,
+  UI_COLOUR_YELLOW = 7
+};
+
+enum LegacyAccentColourChoice : uint8_t {
+  ACCENT_COLOUR_CYAN = 0,
+  ACCENT_COLOUR_BLUE = 1,
+  ACCENT_COLOUR_GREEN = 2,
+  ACCENT_COLOUR_AMBER = 3,
+  ACCENT_COLOUR_MAGENTA = 4,
+  ACCENT_COLOUR_RED = 5,
+  ACCENT_COLOUR_YELLOW = 6
+};
+
+enum VuColourChoice : uint8_t {
+  VU_COLOUR_CYAN = 0,
+  VU_COLOUR_GREEN = 1,
+  VU_COLOUR_AMBER = 2,
+  VU_COLOUR_MAGENTA = 3,
+  VU_COLOUR_WARM_WHITE = 4,
+  VU_COLOUR_RED = 5
+};
+
+static constexpr uint8_t VU_COLOUR_CHOICE_COUNT = 6;
+
+// Ten colour families, with three display-safe shades in each family. The
+// accepted legacy colours occupy the middle position in their family so
+// migration is bit-exact. Accent deliberately starts after the three neutral
+// shades: white must never become an informational/selection colour.
+enum ThemePaletteIndex : uint8_t {
+  PALETTE_WARM_WHITE = 0,
+  PALETTE_SOFT_WHITE,
+  PALETTE_WHITE,
+  PALETTE_ROSE,
+  PALETTE_RED,
+  PALETTE_CRIMSON,
+  PALETTE_PEACH,
+  PALETTE_ORANGE,
+  PALETTE_DEEP_ORANGE,
+  PALETTE_PALE_GOLD,
+  PALETTE_AMBER,
+  PALETTE_DEEP_AMBER,
+  PALETTE_LEMON,
+  PALETTE_YELLOW,
+  PALETTE_GOLD_YELLOW,
+  PALETTE_MINT,
+  PALETTE_GREEN,
+  PALETTE_LIME,
+  PALETTE_ICE_CYAN,
+  PALETTE_CYAN,
+  PALETTE_TEAL,
+  PALETTE_SKY_BLUE,
+  PALETTE_BLUE,
+  PALETTE_ROYAL_BLUE,
+  PALETTE_LAVENDER,
+  PALETTE_VIOLET,
+  PALETTE_PURPLE,
+  PALETTE_PINK,
+  PALETTE_MAGENTA,
+  PALETTE_DEEP_MAGENTA
+};
+
+static constexpr uint8_t THEME_PALETTE_SHADE_COUNT = 3;
+static constexpr uint8_t THEME_PALETTE_COUNT = 30;
+static constexpr uint8_t ACCENT_PALETTE_FIRST = PALETTE_ROSE;
+static constexpr uint8_t THEME_SETTINGS_VERSION = 3;
+
+#define RGB565_CONST(r, g, b) \
+  ((((uint16_t)(r) & 0xF8U) << 8) | \
+   (((uint16_t)(g) & 0xFCU) << 3) | ((uint16_t)(b) >> 3))
+
+static constexpr uint16_t THEME_PALETTE[THEME_PALETTE_COUNT] = {
+  C_WARM_WHITE, RGB565_CONST(218, 230, 240), C_WHITE,
+  RGB565_CONST(255, 118, 132), C_THEME_RED, RGB565_CONST(222, 24, 68),
+  RGB565_CONST(255, 181, 112), C_ORANGE, RGB565_CONST(255, 88, 12),
+  RGB565_CONST(255, 218, 124), C_THEME_AMBER, RGB565_CONST(238, 137, 12),
+  RGB565_CONST(255, 247, 132), C_THEME_YELLOW, RGB565_CONST(232, 193, 0),
+  RGB565_CONST(132, 255, 184), C_THEME_GREEN, RGB565_CONST(154, 255, 38),
+  RGB565_CONST(150, 255, 255), C_CYAN, RGB565_CONST(0, 205, 190),
+  RGB565_CONST(125, 196, 255), C_THEME_BLUE, RGB565_CONST(61, 91, 255),
+  RGB565_CONST(204, 153, 255), C_PURPLE, RGB565_CONST(112, 61, 220),
+  RGB565_CONST(255, 135, 221), C_THEME_PINK, RGB565_CONST(207, 34, 178)
+};
+
+struct ThemeSettingsRecord {
+  uint8_t version;
+  uint8_t mainTextPalette;
+  uint8_t accentPalette;
+  uint8_t meterPalette;
+  uint8_t analogVu;
+};
+static_assert(sizeof(ThemeSettingsRecord) == 5,
+              "Theme settings record must remain one five-byte NVS blob");
+
+struct LegacyThemeSettingsRecordV2 {
+  uint8_t version;
+  uint8_t mainText;
+  uint8_t accent;
+  uint8_t vu;
+};
+static_assert(sizeof(LegacyThemeSettingsRecordV2) == 4,
+              "Legacy theme record layout changed");
+
+static constexpr uint8_t PRESET_PANEL_SETTINGS_VERSION = 2;
+
+struct PresetPanelSettingsRecord {
+  uint8_t version;
+  uint8_t brightness;
+  uint8_t timeout;
+  uint8_t dim;
+  uint8_t timeoutAction;
+  uint8_t mainTextPalette;
+  uint8_t accentPalette;
+  uint8_t meterPalette;
+  uint8_t analogVu;
+};
+static_assert(sizeof(PresetPanelSettingsRecord) == 9,
+              "Per-preset panel settings must remain one nine-byte NVS blob");
+
+struct LegacyPresetPanelSettingsRecordV1 {
+  uint8_t version;
+  uint8_t brightness;
+  uint8_t timeout;
+  uint8_t dim;
+  uint8_t timeoutAction;
+  uint8_t mainText;
+  uint8_t accent;
+  uint8_t vu;
+};
+static_assert(sizeof(LegacyPresetPanelSettingsRecordV1) == 8,
+              "Legacy per-preset panel record layout changed");
+
+enum ScreenTimeoutAction : uint8_t {
+  SCREEN_TIMEOUT_DIM = 0,
+  SCREEN_TIMEOUT_OFF = 1,
+  SCREEN_TIMEOUT_DIGITAL_VU = 2,
+  SCREEN_TIMEOUT_ANALOG_VU = 3
 };
 
 enum ChangeOverlayKind : uint8_t {
@@ -5605,10 +5767,14 @@ unsigned long mediaMarqueeLastFrameAt = 0;
 int16_t mediaMarqueeOffset = 0;
 bool mediaMarqueeComplete = false;
 unsigned long mediaNowPlayingLastProgressAt = 0;
+bool mediaBrowserRedrawPending = false;
+bool mediaBrowserFullRedrawPending = false;
+unsigned long mediaBrowserLastRedrawAt = 0;
 
 UiView uiView = VIEW_HOME;
 MenuPage menuPage = PAGE_MAIN;
 uint8_t menuIndex = 0;
+uint8_t presetListTopRow = 0;
 
 bool editActive = false;
 float editFloat = 0.0f;
@@ -5618,12 +5784,25 @@ int editOriginalInt = 0;
 bool editBool = false;
 bool editOriginalBool = false;
 
-uint8_t rememberedMenuIndex[PAGE_SCREEN_SETTINGS + 1] = {};
+uint8_t rememberedMenuIndex[PAGE_THEME + 1] = {};
 uint8_t lastMainMenuIndex = 0;
 
 uint8_t brightnessPercent = 80;
 uint8_t screenTimeoutOption = 0;
 uint8_t screenDimPercent = 20;
+ScreenTimeoutAction screenTimeoutAction = SCREEN_TIMEOUT_DIM;
+uint8_t mainTextPaletteIndex = PALETTE_WHITE;
+uint8_t accentPaletteIndex = PALETTE_CYAN;
+uint8_t volumeMeterPaletteIndex = PALETTE_CYAN;
+VuColourChoice analogVuColourChoice = VU_COLOUR_CYAN;
+// One selected non-cyan face is generated into PSRAM and retained. Reusing
+// this fixed-size cache gives every analogue colour the same per-frame path as
+// the original cyan bitmap instead of transforming 76,800 pixels per needle
+// update. The buffer is regenerated in place when a preset/theme changes it.
+uint16_t *analogVuFaceCache = nullptr;
+uint8_t analogVuFaceCacheChoice = UINT8_MAX;
+bool analogVuFaceCacheWarningPrinted = false;
+bool analogVuFaceCacheAllocationFailed = false;
 RemoteMapEntry remoteMap[BLE_MAPPING_COUNT] = {};
 
 const UiAction bleMappingActions[BLE_MAPPING_COUNT] = {
@@ -5726,6 +5905,9 @@ unsigned long lastConnectAttemptAt = 0;
 unsigned long delayedRefreshAt = 0;
 bool stateRefreshRequested = false;
 unsigned long notificationRefreshAt = 0;
+bool notificationFullRefreshRequested = false;
+bool externalRuntimeRefreshRequested = false;
+bool externalRuntimeStateReady = false;
 uint8_t dspiFailureCount = 0;
 bool dspiRequestInFlight = false;
 const char *scheduledSourceReason = "verified GET";
@@ -5769,9 +5951,14 @@ unsigned long featureConfirmUntil = 0;
 UiView featureConfirmReturnView = VIEW_HOME;
 
 bool presetSaveConfirmYes = false;
+uint8_t presetSaveDestination = 0;
 bool presetSaveCompletionPending = false;
 uint8_t presetSaveCompletionAttempts = 0;
+uint8_t presetSaveCompletionSlot = 0;
 unsigned long presetSaveCompletionAt = 0;
+bool presetSavePanelSettingsOk = true;
+bool presetPanelSettingsSlotApplied = false;
+uint8_t presetPanelSettingsAppliedSlot = 0;
 
 bool wifiTransferConfirmStart = false;
 char wifiTransferUiError[96] = {0};
@@ -5862,6 +6049,8 @@ char wifiTransferExitReason[64] = {0};
 
 ChangeOverlayKind changeOverlayKind = CHANGE_OVERLAY_NONE;
 unsigned long changeOverlayUntil = 0;
+bool queuedSourceOverlay = false;
+InputSource queuedSourceOverlayValue = SRC_USB;
 uint8_t changeOverlayPreset = 0;
 InputSource changeOverlaySource = SRC_USB;
 bool pendingPresetOverlay = false;
@@ -5869,6 +6058,10 @@ uint8_t pendingPresetOverlaySlot = 0;
 
 unsigned long lastUserActivityAt = 0;
 bool screenDimmed = false;
+bool screenTimeoutViewActive = false;
+UiView screenTimeoutReturnView = VIEW_HOME;
+unsigned long screenTimeoutVuStableSince = 0;
+unsigned long screenTimeoutVuRetryAt = 0;
 bool backlightFadeActive = false;
 uint8_t backlightFadeFrom = 0;
 uint8_t backlightFadeTo = 0;
@@ -5888,7 +6081,12 @@ int16_t encoderMenuDetentRemainder = 0;
 
 void showPresetChangeOverlay(uint8_t slot);
 void showSourceChangeOverlay(InputSource source);
-void recordUserActivity();
+void queueSourceChangeAfterPreset(InputSource source);
+void showFeatureStateNotification(const char *featureName, bool enabled);
+bool recordUserActivity();
+void applyBrightness();
+bool savePresetPanelSettings(uint8_t slot);
+bool applyPresetPanelSettings(uint8_t slot, bool force = false);
 InputSource displayedPhysicalInputSource();
 void drawBleSpinner(int16_t cx, int16_t cy, uint8_t phase);
 void drawBase();
@@ -5899,6 +6097,19 @@ void drawFontCentredGlow(const FontDef &font, int16_t y,
 void drawFontCentredGlowColour(const FontDef &font, int16_t y,
                                const String &text, uint16_t colour);
 void drawMenuOptionCentredGlow(int16_t y, const String &text);
+uint16_t uiMainText();
+uint16_t uiDimText();
+uint16_t uiAccent();
+uint16_t uiAccentSoft();
+uint16_t uiAccentDark();
+uint16_t uiAccentInfo();
+uint16_t uiVolumeMeterColour();
+uint16_t uiAnalogVuColour();
+uint16_t uiBackground();
+uint16_t uiWarning();
+uint16_t uiFault();
+uint16_t uiClip();
+uint16_t uiSuccess();
 void flushCanvasLocked();
 bool flushCanvasTryLocked(uint32_t timeoutMs);
 bool flushCanvasRegionTryLocked(int16_t x, int16_t y, int16_t w, int16_t h, uint32_t timeoutMs);
@@ -5915,6 +6126,10 @@ void requestWifiTransferEntry();
 void requestWifiTransferSafeExit(const char *reason);
 void serviceWifiTransfer();
 void serviceWifiTransferUiRedraw();
+bool drawVisualizer();
+float combinedOutputPeakDbfs();
+float analogDisplayVuFromDbfs(float dbfs);
+void resetAnalogPeakHold(float seedDb);
 bool wifiTransferExclusive();
 String mediaPlaybackFailureToast();
 void clearMediaRejection();
@@ -6023,6 +6238,8 @@ bool bleHeldCanRepeat = false;
 bool bleHeldFailsafeBlocked = false;
 bool bleHeldSeekGesture = false;
 bool bleHeldSeekCommitted = false;
+bool bleHeldPresetSelectGesture = false;
+bool bleHeldPresetSaveCommitted = false;
 #else
 bool bleConnected = false;
 #endif
@@ -6121,6 +6338,254 @@ uint16_t blend565(uint16_t bg, uint16_t fg, uint8_t alpha)
   uint8_t b = (fb * alpha + bb * (255 - alpha)) / 255;
 
   return (r << 11) | (g << 5) | b;
+}
+
+uint16_t themePaletteColour(uint8_t index)
+{
+  return THEME_PALETTE[index < THEME_PALETTE_COUNT ? index : PALETTE_WHITE];
+}
+
+uint8_t legacyMainTextToPalette(uint8_t choice)
+{
+  switch (choice) {
+    case UI_COLOUR_CYAN: return PALETTE_CYAN;
+    case UI_COLOUR_BLUE: return PALETTE_BLUE;
+    case UI_COLOUR_GREEN: return PALETTE_GREEN;
+    case UI_COLOUR_AMBER: return PALETTE_AMBER;
+    case UI_COLOUR_MAGENTA: return PALETTE_MAGENTA;
+    case UI_COLOUR_RED: return PALETTE_RED;
+    case UI_COLOUR_YELLOW: return PALETTE_YELLOW;
+    case UI_COLOUR_WHITE:
+    default: return PALETTE_WHITE;
+  }
+}
+
+uint8_t legacyAccentToPalette(uint8_t choice)
+{
+  switch (choice) {
+    case ACCENT_COLOUR_BLUE: return PALETTE_BLUE;
+    case ACCENT_COLOUR_GREEN: return PALETTE_GREEN;
+    case ACCENT_COLOUR_AMBER: return PALETTE_AMBER;
+    case ACCENT_COLOUR_MAGENTA: return PALETTE_MAGENTA;
+    case ACCENT_COLOUR_RED: return PALETTE_RED;
+    case ACCENT_COLOUR_YELLOW: return PALETTE_YELLOW;
+    case ACCENT_COLOUR_CYAN:
+    default: return PALETTE_CYAN;
+  }
+}
+
+uint8_t legacyVuToPalette(uint8_t choice)
+{
+  switch (choice) {
+    case VU_COLOUR_GREEN: return PALETTE_GREEN;
+    case VU_COLOUR_AMBER: return PALETTE_AMBER;
+    case VU_COLOUR_MAGENTA: return PALETTE_MAGENTA;
+    case VU_COLOUR_WARM_WHITE: return PALETTE_WARM_WHITE;
+    case VU_COLOUR_RED: return PALETTE_RED;
+    case VU_COLOUR_CYAN:
+    default: return PALETTE_CYAN;
+  }
+}
+
+String vuColourChoiceText(VuColourChoice choice)
+{
+  switch (choice) {
+    case VU_COLOUR_GREEN: return "Green";
+    case VU_COLOUR_AMBER: return "Amber";
+    case VU_COLOUR_MAGENTA: return "Magenta";
+    case VU_COLOUR_WARM_WHITE: return "Warm White";
+    case VU_COLOUR_RED: return "Red";
+    case VU_COLOUR_CYAN:
+    default: return "Cyan";
+  }
+}
+
+uint16_t uiMainText()
+{
+  return themePaletteColour(mainTextPaletteIndex);
+}
+
+uint16_t uiDimText()
+{
+  // Alpha 127 reproduces the former 0x7BEF grey exactly for the default white.
+  return blend565(C_BLACK, uiMainText(), 127);
+}
+
+uint16_t uiAccent()
+{
+  return themePaletteColour(accentPaletteIndex);
+}
+
+uint16_t uiAccentSoft()
+{
+  // Preserve the accepted cyan variants bit-for-bit at the default setting.
+  if (accentPaletteIndex == PALETTE_CYAN) return C_CYAN_SOFT;
+  return blend565(C_BLACK, uiAccent(), 200);
+}
+
+uint16_t uiAccentDark()
+{
+  if (accentPaletteIndex == PALETTE_CYAN) return C_CYAN_DARK;
+  return blend565(C_BLACK, uiAccent(), 96);
+}
+
+uint16_t uiAccentInfo()
+{
+  if (accentPaletteIndex == PALETTE_CYAN) return C_BLUE;
+  return blend565(C_BLACK, uiAccent(), 150);
+}
+
+uint16_t uiVolumeMeterColour()
+{
+  return themePaletteColour(volumeMeterPaletteIndex);
+}
+
+uint16_t uiAnalogVuColour()
+{
+  switch (analogVuColourChoice) {
+    case VU_COLOUR_GREEN: return C_THEME_GREEN;
+    case VU_COLOUR_AMBER: return C_THEME_AMBER;
+    case VU_COLOUR_MAGENTA: return C_THEME_PINK;
+    case VU_COLOUR_WARM_WHITE: return C_WARM_WHITE;
+    case VU_COLOUR_RED: return C_THEME_RED;
+    case VU_COLOUR_CYAN:
+    default: return C_CYAN;
+  }
+}
+
+uint16_t uiBackground() { return C_BLACK; }
+uint16_t uiWarning() { return C_ORANGE; }
+uint16_t uiFault() { return C_RED; }
+uint16_t uiClip() { return C_RED; }
+uint16_t uiSuccess() { return C_CYAN; }
+
+bool persistThemePreferencesNow()
+{
+  const ThemeSettingsRecord record = {
+    THEME_SETTINGS_VERSION,
+    mainTextPaletteIndex,
+    accentPaletteIndex,
+    volumeMeterPaletteIndex,
+    (uint8_t)analogVuColourChoice
+  };
+  const size_t written = preferences.putBytes(
+      "theme_cfg", &record, sizeof(record));
+  const bool ok = written == sizeof(record);
+  Serial.printf("THEME NVS: immediate=%s bytes=%u\n",
+                ok ? "OK" : "FAILED", (unsigned)written);
+  return ok;
+}
+
+void presetPanelSettingsKey(uint8_t slot, char *key, size_t keyCapacity)
+{
+  snprintf(key, keyCapacity, "preset_ui%u", (unsigned)slot);
+}
+
+bool presetPanelSettingsRecordValid(const PresetPanelSettingsRecord &record)
+{
+  return record.version == PRESET_PANEL_SETTINGS_VERSION &&
+         record.brightness >= 10 && record.brightness <= 100 &&
+         record.timeout <= 4 && record.dim >= 10 && record.dim <= 80 &&
+         (record.dim % 10) == 0 &&
+         record.timeoutAction <= SCREEN_TIMEOUT_ANALOG_VU &&
+         record.mainTextPalette < THEME_PALETTE_COUNT &&
+         record.accentPalette >= ACCENT_PALETTE_FIRST &&
+         record.accentPalette < THEME_PALETTE_COUNT &&
+         record.meterPalette < THEME_PALETTE_COUNT &&
+         record.analogVu < VU_COLOUR_CHOICE_COUNT;
+}
+
+bool savePresetPanelSettings(uint8_t slot)
+{
+  if (slot >= 10) return false;
+  const PresetPanelSettingsRecord record = {
+    PRESET_PANEL_SETTINGS_VERSION,
+    brightnessPercent,
+    screenTimeoutOption,
+    screenDimPercent,
+    (uint8_t)screenTimeoutAction,
+    mainTextPaletteIndex,
+    accentPaletteIndex,
+    volumeMeterPaletteIndex,
+    (uint8_t)analogVuColourChoice
+  };
+  char key[12] = {0};
+  presetPanelSettingsKey(slot, key, sizeof(key));
+  const size_t written = preferences.putBytes(key, &record, sizeof(record));
+  const bool ok = written == sizeof(record);
+  Serial.printf("PRESET PANEL NVS: save slot=P%u result=%s bytes=%u\n",
+                (unsigned)slot + 1U, ok ? "OK" : "FAILED",
+                (unsigned)written);
+  if (ok && slot == dspi.activePreset) {
+    presetPanelSettingsSlotApplied = true;
+    presetPanelSettingsAppliedSlot = slot;
+  }
+  return ok;
+}
+
+bool applyPresetPanelSettings(uint8_t slot, bool force)
+{
+  if (slot >= 10) return false;
+  if (!force && presetPanelSettingsSlotApplied &&
+      presetPanelSettingsAppliedSlot == slot) return true;
+
+  // Mark even a legacy/missing slot as observed so routine polling cannot
+  // repeatedly overwrite unsaved on-panel adjustments for the active preset.
+  presetPanelSettingsSlotApplied = true;
+  presetPanelSettingsAppliedSlot = slot;
+
+  char key[12] = {0};
+  presetPanelSettingsKey(slot, key, sizeof(key));
+  PresetPanelSettingsRecord record = {};
+  const size_t storedBytes = preferences.getBytesLength(key);
+  bool legacyPresetMigrated = false;
+  if (storedBytes == sizeof(record)) {
+    preferences.getBytes(key, &record, sizeof(record));
+  } else if (storedBytes == sizeof(LegacyPresetPanelSettingsRecordV1)) {
+    LegacyPresetPanelSettingsRecordV1 legacy = {};
+    preferences.getBytes(key, &legacy, sizeof(legacy));
+    if (legacy.version == 1 && legacy.brightness >= 10 &&
+        legacy.brightness <= 100 && legacy.timeout <= 4 &&
+        legacy.dim >= 10 && legacy.dim <= 80 &&
+        (legacy.dim % 10) == 0 &&
+        legacy.timeoutAction <= SCREEN_TIMEOUT_ANALOG_VU &&
+        legacy.mainText <= UI_COLOUR_YELLOW &&
+        legacy.accent <= ACCENT_COLOUR_YELLOW &&
+        legacy.vu < VU_COLOUR_CHOICE_COUNT) {
+      record = {
+        PRESET_PANEL_SETTINGS_VERSION,
+        legacy.brightness,
+        legacy.timeout,
+        legacy.dim,
+        legacy.timeoutAction,
+        legacyMainTextToPalette(legacy.mainText),
+        legacyAccentToPalette(legacy.accent),
+        legacyVuToPalette(legacy.vu),
+        legacy.vu
+      };
+      legacyPresetMigrated = true;
+    }
+  }
+  if (!presetPanelSettingsRecordValid(record)) {
+    Serial.printf("PRESET PANEL NVS: load slot=P%u result=legacy/default\n",
+                  (unsigned)slot + 1U);
+    return false;
+  }
+
+  brightnessPercent = record.brightness;
+  screenTimeoutOption = record.timeout;
+  screenDimPercent = record.dim;
+  screenTimeoutAction = (ScreenTimeoutAction)record.timeoutAction;
+  mainTextPaletteIndex = record.mainTextPalette;
+  accentPaletteIndex = record.accentPalette;
+  volumeMeterPaletteIndex = record.meterPalette;
+  analogVuColourChoice = (VuColourChoice)record.analogVu;
+  prepareAnalogVuFaceCache();
+  applyBrightness();
+  if (legacyPresetMigrated) savePresetPanelSettings(slot);
+  Serial.printf("PRESET PANEL NVS: load slot=P%u result=OK\n",
+                (unsigned)slot + 1U);
+  return true;
 }
 
 
@@ -6765,7 +7230,9 @@ void acceptDspiNotification(const UartFrame &frame)
   if (frame.length >= 2 && frame.payload[0] == 2 &&
       (frame.payload[1] == 0x03 || frame.payload[1] == 0x04)) {
     scheduledSourceReason = "preset refresh";
+    notificationFullRefreshRequested = true;
   }
+  externalRuntimeRefreshRequested = true;
   notificationRefreshAt = millis() + DSPI_NOTIFICATION_REFRESH_MS;
 }
 
@@ -7456,6 +7923,7 @@ bool syncCurrentState(bool includePresetNames)
   bool oldSpdifNonAudio = dspi.spdifNonAudio;
   candidate.connected = true;
   dspi = candidate;
+  applyPresetPanelSettings(dspi.activePreset);
 
   const bool sourceChanged = oldSource != dspi.source;
   const bool presetChanged = oldActivePreset != dspi.activePreset;
@@ -7480,19 +7948,26 @@ bool syncCurrentState(bool includePresetNames)
   if (oldConnected && pendingPresetOverlay &&
       dspi.activePreset == pendingPresetOverlaySlot) {
     showPresetChangeOverlay(dspi.activePreset);
+    if (sourceChanged) queueSourceChangeAfterPreset(dspi.source);
     pendingPresetOverlay = false;
   } else if (oldConnected && presetChanged) {
     if (uiView == VIEW_HOME || uiView == VIEW_CHANGE_OVERLAY) {
       showPresetChangeOverlay(dspi.activePreset);
+      if (sourceChanged) queueSourceChangeAfterPreset(dspi.source);
     }
     pendingPresetOverlay = false;
   } else if (oldConnected && sourceChanged &&
              (uiView == VIEW_HOME || uiView == VIEW_CHANGE_OVERLAY)) {
-    showSourceChangeOverlay(dspi.source);
+    if (uiView == VIEW_CHANGE_OVERLAY &&
+        changeOverlayKind == CHANGE_OVERLAY_PRESET) {
+      queueSourceChangeAfterPreset(dspi.source);
+    } else {
+      showSourceChangeOverlay(dspi.source);
+    }
   }
-  if (menuPage == PAGE_PRESET && !editActive && oldActivePreset != dspi.activePreset &&
-      isPresetOccupied(dspi.activePreset)) {
-    editInt = dspi.activePreset;
+  if (menuPage == PAGE_PRESET && !editActive &&
+      oldActivePreset != dspi.activePreset) {
+    menuIndex = dspi.activePreset;
   }
   if (oldSource != dspi.source) {
     Serial.printf("DSPi source change: old=%u new=%u reason=%s\n",
@@ -7503,8 +7978,108 @@ bool syncCurrentState(bool includePresetNames)
   // preset-change value.
   scheduledSourceReason = "verified GET";
   stateRefreshRequested = false;
+  externalRuntimeRefreshRequested = false;
+  externalRuntimeStateReady = true;
   lastStateSyncAt = millis();
   return true;
+}
+
+bool pollExternalRuntimeState()
+{
+  if (!dspi.connected) return false;
+
+  float observedVolume = dspi.volumeDb;
+  uint8_t observedPreset = dspi.activePreset;
+  uint8_t observedSource = (uint8_t)dspi.source;
+  uint8_t observedLoudness = dspi.loudnessEnabled ? 1 : 0;
+  uint8_t observedCrossfeed = dspi.crossfeedEnabled ? 1 : 0;
+  uint8_t observedLeveller = dspi.levellerEnabled ? 1 : 0;
+  uint8_t observedPsybass = dspi.psybassEnabled ? 1 : 0;
+
+  // Publish every exact read independently. One unsupported or temporarily
+  // busy GET must not freeze unrelated Console state such as volume, preset,
+  // source, or the Home feature symbols.
+  const bool volumeValid =
+      getExactFloat(REQ_GET_USER_VOLUME, observedVolume, true);
+  if (!volumeValid) return false;
+  const bool presetValid =
+      getExactByte(REQ_PRESET_GET_ACTIVE, observedPreset, 0, false) &&
+      observedPreset < 10;
+  const bool sourceValid =
+      getExactByte(REQ_GET_INPUT_SOURCE, observedSource, 0, false) &&
+      observedSource <= SRC_MAX;
+  const bool loudnessValid =
+      getExactByte(REQ_GET_LOUDNESS, observedLoudness, 0, false) &&
+      observedLoudness <= 1;
+  const bool crossfeedValid =
+      getExactByte(REQ_GET_CROSSFEED, observedCrossfeed, 0, false) &&
+      observedCrossfeed <= 1;
+  const bool levellerValid =
+      getExactByte(REQ_GET_LEVELLER_ENABLE, observedLeveller, 0, false) &&
+      observedLeveller <= 1;
+  const bool psybassValid = dspi.psybassSupported &&
+      getExactByte(REQ_GET_PSYBASS, observedPsybass, 0, false) &&
+      observedPsybass <= 1;
+
+  const bool volumeChanged = volumeValid &&
+      fabsf(observedVolume - dspi.volumeDb) > 0.01f;
+  const bool presetChanged = presetValid &&
+      observedPreset != dspi.activePreset;
+  const bool sourceChanged = sourceValid &&
+      observedSource != (uint8_t)dspi.source;
+  const bool loudnessChanged = loudnessValid &&
+      (observedLoudness != 0) != dspi.loudnessEnabled;
+  const bool crossfeedChanged = crossfeedValid &&
+      (observedCrossfeed != 0) != dspi.crossfeedEnabled;
+  const bool levellerChanged = levellerValid &&
+      (observedLeveller != 0) != dspi.levellerEnabled;
+  const bool psybassChanged = psybassValid &&
+      (observedPsybass != 0) != dspi.psybassEnabled;
+  const bool anyChanged = volumeChanged || presetChanged || sourceChanged ||
+      loudnessChanged || crossfeedChanged || levellerChanged ||
+      psybassChanged;
+
+  if (volumeValid) dspi.volumeDb = observedVolume;
+  if (presetValid) dspi.activePreset = observedPreset;
+  if (sourceValid) dspi.source = (InputSource)observedSource;
+  if (loudnessValid) dspi.loudnessEnabled = observedLoudness != 0;
+  if (crossfeedValid) dspi.crossfeedEnabled = observedCrossfeed != 0;
+  if (levellerValid) dspi.levellerEnabled = observedLeveller != 0;
+  if (psybassValid) dspi.psybassEnabled = observedPsybass != 0;
+  if (presetChanged) applyPresetPanelSettings(dspi.activePreset);
+
+  const bool notificationsAllowed = externalRuntimeStateReady;
+  externalRuntimeStateReady = true;
+  if (!notificationsAllowed) return anyChanged;
+
+  // Preset and source identity remain the higher-priority distance views.
+  // Feature values restored by a preset do not create extra announcements.
+  if (presetChanged) {
+    syncPresetNameCandidate(dspi, dspi.activePreset);
+    resetMetersForStateChange("external preset changed");
+    if (uiView == VIEW_HOME || uiView == VIEW_CHANGE_OVERLAY) {
+      showPresetChangeOverlay(dspi.activePreset);
+      if (sourceChanged) queueSourceChangeAfterPreset(dspi.source);
+    }
+  } else if (sourceChanged) {
+    resetMetersForStateChange("external input source changed");
+    if (uiView == VIEW_HOME || uiView == VIEW_CHANGE_OVERLAY) {
+      showSourceChangeOverlay(dspi.source);
+    }
+  } else if (loudnessChanged) {
+    showFeatureStateNotification("Loudness", dspi.loudnessEnabled);
+  } else if (crossfeedChanged) {
+    showFeatureStateNotification("Crossfeed", dspi.crossfeedEnabled);
+  } else if (levellerChanged) {
+    showFeatureStateNotification("Leveller", dspi.levellerEnabled);
+  } else if (psybassChanged) {
+    showFeatureStateNotification("Psy Bass", dspi.psybassEnabled);
+  }
+
+  if (presetChanged && menuPage == PAGE_PRESET && !editActive) {
+    menuIndex = dspi.activePreset;
+  }
+  return anyChanged;
 }
 
 uint8_t meterLeftChannelIndex()
@@ -7695,6 +8270,24 @@ bool ensureIndependentMasterVolumeModeVerified()
     uint8_t mode = 0xFF;
     if (getExactByte(REQ_GET_MASTER_VOLUME_MODE, mode) && mode == 0) {
       dspi.masterVolumeMode = 0;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ensurePresetMasterVolumeModeVerified()
+{
+  // A held-OK preset save is explicitly a complete per-preset snapshot. DSPi
+  // only includes Master Volume in native preset data while Mode 1 is active.
+  if (dspi.masterVolumeMode == 1) return true;
+  if (!dspiSetByte(REQ_SET_MASTER_VOLUME_MODE, 1)) return false;
+
+  for (uint8_t attempt = 0; attempt < 6; attempt++) {
+    delay(attempt == 0 ? 110 : 65);
+    uint8_t mode = 0xFF;
+    if (getExactByte(REQ_GET_MASTER_VOLUME_MODE, mode) && mode == 1) {
+      dspi.masterVolumeMode = 1;
       return true;
     }
   }
@@ -8002,6 +8595,9 @@ bool activateDspiMediaRoute(uint32_t sampleRate, bool userInitiated)
     return false;
   }
 
+  // Publish the verified live I2S rate immediately.  Home therefore reports
+  // PCM 44.1/48 using the normal DSPi metadata path from the first track.
+  dspi.sampleRate = sampleRate;
   mediaRoute.active = true;
   mediaRoute.activeRate = sampleRate;
   Serial.printf(
@@ -8405,7 +9001,8 @@ void serviceMediaArtwork()
 
   if (mediaArtworkRequestPending && !mediaArtworkJobSubmitted &&
       (long)(millis() - mediaArtworkNotBefore) >= 0 &&
-      !mediaTrackTransitionActive()) {
+      !mediaTrackTransitionActive() &&
+      uiView == VIEW_MEDIA_NOW_PLAYING) {
     const size_t capacity = mediaPlayerPoc.ringCapacityFrames();
     const size_t buffered = mediaPlayerPoc.bufferedFrames();
     MediaPlaybackState playback = mediaPlayerPoc.playbackState();
@@ -9343,6 +9940,10 @@ void transitionToMediaNowPlaying()
   fadeUiOut();
   mediaVolumeOverlayVisible = false;
   uiView = VIEW_MEDIA_NOW_PLAYING;
+  if (mediaPlayerPoc.active() && !mediaArtworkPixels &&
+      !mediaArtworkRequestPending && mediaCurrentPath[0]) {
+    scheduleMediaArtwork(mediaCurrentPath);
+  }
   drawMediaNowPlaying();
   fadeUiIn();
 }
@@ -9410,7 +10011,7 @@ void selectMediaMenuItem()
   }
 }
 
-bool loadPreset(uint8_t slot)
+bool loadPreset(uint8_t slot, bool announce)
 {
   if (!dspi.connected || slot >= 10 || mediaTrackTransitionActive() ||
       mediaPlayerPoc.seeking()) {
@@ -9612,9 +10213,21 @@ bool loadPreset(uint8_t slot)
   mediaPlayerPoc.endExternalHold();
   mediaPresetRefreshPending = false;
   pendingPresetOverlay = false;
+  applyPresetPanelSettings(slot, true);
   resetMetersForStateChange("preset transaction complete");
   scheduleStateRefresh(180, "preset transaction refresh");
-  showPresetChangeOverlay(slot);
+  if (announce) {
+    showPresetChangeOverlay(slot);
+  } else {
+    // A load initiated from the Preset list is an in-place selection. Keep
+    // the list visible and let its accent dot publish the verified active slot.
+    menuPage = PAGE_PRESET;
+    menuIndex = slot;
+    rememberedMenuIndex[PAGE_PRESET] = slot;
+    editActive = false;
+    uiView = VIEW_MENU;
+    drawMenu();
+  }
   Serial.printf("PRESET TX: complete slot=%u preset_volume=%.1f restored_master=%.1f "
                 "mute=%s\n",
                 (unsigned)slot, dspi.volumeDb, dspi.masterVolumeDb,
@@ -9622,22 +10235,36 @@ bool loadPreset(uint8_t slot)
   return true;
 }
 
-bool saveCurrentPreset()
+bool saveCurrentPreset(uint8_t destinationSlot)
 {
-  if (!dspi.connected || dspi.activePreset >= 10 ||
-      mediaPlayerPoc.active()) return false;
+  if (!dspi.connected || destinationSlot >= 10 ||
+      mediaPlayerPoc.active() || presetSaveCompletionPending) return false;
+
+  if (!ensurePresetMasterVolumeModeVerified()) {
+    Serial.println("PRESET SAVE: unable to enable preset-scoped Master Volume");
+    return false;
+  }
 
   uint8_t payload[1] = {0xFF};
   uint16_t length = 0;
-  if (!dspiGet(REQ_PRESET_SAVE, dspi.activePreset, 1,
+  if (!dspiGet(REQ_PRESET_SAVE, destinationSlot, 1,
                payload, sizeof(payload), length) ||
       length != 1 || payload[0] != 0) return false;
+
+  // The DSPi command captures feature parameters and User Volume (the volume
+  // restored when this slot loads at startup), plus Master Volume in Mode 1.
+  // The companion ESP32 record binds Theme and Screen Settings to that slot.
+  presetSavePanelSettingsOk = savePresetPanelSettings(destinationSlot);
 
   // DSPi performs the flash write in its main loop. Reconnect and refresh the
   // directory after the blackout instead of issuing more traffic immediately.
   presetSaveCompletionPending = true;
   presetSaveCompletionAttempts = 0;
+  presetSaveCompletionSlot = destinationSlot;
   presetSaveCompletionAt = millis() + PRESET_SAVE_REFRESH_MS;
+  Serial.printf("PRESET SAVE: accepted destination=P%u panel=%s\n",
+                (unsigned)destinationSlot + 1U,
+                presetSavePanelSettingsOk ? "OK" : "FAILED");
   return true;
 }
 
@@ -9874,16 +10501,14 @@ String mediaBrowserItemTag(uint8_t index)
 
 String sourceText()
 {
-  MediaPlaybackState playback = mediaPlayerPoc.playbackState();
-  if (playback == MediaPlaybackState::Starting ||
-      playback == MediaPlaybackState::Playing ||
-      playback == MediaPlaybackState::Seeking) return "Music";
-  return inputSourceDisplayText(displayedPhysicalInputSource());
+  // Music is the ESP32's I2S programme, not a separate DSPi input or Home
+  // layer.  Always present the source DSPi is actually listening to.
+  return inputSourceDisplayText(dspi.source);
 }
 
 InputSource displayedPhysicalInputSource()
 {
-  return mediaRoute.captured ? mediaRoute.source : dspi.source;
+  return dspi.source;
 }
 
 String sourceMenuText(InputSource source)
@@ -9910,10 +10535,6 @@ String sampleRateText()
 
 String audioMetaText()
 {
-  if (mediaPlayerPoc.active()) {
-    MediaFileInfo info = mediaPlayerPoc.playbackFile();
-    return String("SD ") + sampleRateTextFor(info.sampleRate);
-  }
   if (!dspi.connected) return "NO DSPi";
   if (isSpdifSource(dspi.source) && dspi.spdifState != 2) return "PCM NO LOCK";
   if (dspi.source == SRC_ADAT && dspi.adatState != 3) return "PCM NO LOCK";
@@ -9933,15 +10554,6 @@ int8_t firstOccupiedPreset()
   return -1;
 }
 
-uint8_t displayedPresetSlot()
-{
-  if (menuPage == PAGE_PRESET && menuIndex == 0 &&
-      isPresetOccupied((uint8_t)editInt)) return (uint8_t)editInt;
-  if (isPresetOccupied(dspi.activePreset)) return dspi.activePreset;
-  int8_t first = firstOccupiedPreset();
-  return first >= 0 ? (uint8_t)first : dspi.activePreset;
-}
-
 String presetName(uint8_t slot)
 {
   if (!isPresetOccupied(slot)) return "";
@@ -9954,6 +10566,17 @@ String presetName(uint8_t slot)
   if (name.equalsIgnoreCase(genericLong) || name.equalsIgnoreCase(genericShort)) return "";
 
   return name;
+}
+
+String presetListLabel(uint8_t slot)
+{
+  slot = std::min<uint8_t>(slot, 9);
+  String name = presetName(slot);
+  if (!name.length()) {
+    name = isPresetOccupied(slot)
+        ? "Preset " + String((int)slot + 1) : "Empty";
+  }
+  return "P" + String((int)slot + 1) + ". " + name;
 }
 
 String crossfeedProfileText(uint8_t value)
@@ -9992,6 +10615,8 @@ String pageTitle(MenuPage page)
     case PAGE_SYSTEM: return "System";
     case PAGE_MEDIA_SETTINGS: return "Music Settings";
     case PAGE_SCREEN_SETTINGS: return "Screen Settings";
+    case PAGE_IDLE_SCREEN: return "Idle Screen";
+    case PAGE_THEME: return "Theme";
   }
   return "Menu";
 }
@@ -10088,7 +10713,7 @@ uint8_t menuItemCount(MenuPage page)
     case PAGE_MAIN: return 9;
     case PAGE_INPUT: return 1;
     case PAGE_MEDIA: return mediaBrowserItemCount();
-    case PAGE_PRESET: return 2;
+    case PAGE_PRESET: return 10;
     case PAGE_LOUDNESS: return 3;
     case PAGE_CROSSFEED: return 4;
     case PAGE_LEVELLER: return 6;
@@ -10096,7 +10721,10 @@ uint8_t menuItemCount(MenuPage page)
     case PAGE_BLUETOOTH: return bleMenuItemCount();
     case PAGE_SYSTEM: return 3;
     case PAGE_MEDIA_SETTINGS: return 1;
-    case PAGE_SCREEN_SETTINGS: return 3;
+    case PAGE_SCREEN_SETTINGS: return 4;
+    case PAGE_IDLE_SCREEN:
+      return screenTimeoutAction == SCREEN_TIMEOUT_DIM ? 5 : 4;
+    case PAGE_THEME: return 4;
   }
   return 1;
 }
@@ -10111,7 +10739,7 @@ String menuItemName(MenuPage page, uint8_t index)
   if (page == PAGE_MEDIA) {
     return mediaBrowserItemName(index);
   }
-  if (page == PAGE_PRESET) return index == 0 ? "Select" : "Save Current";
+  if (page == PAGE_PRESET) return presetListLabel(index);
   if (page == PAGE_LOUDNESS) {
     const char *items[] = {"Enable", "Reference SPL", "Strength"};
     return items[std::min<uint8_t>(index, 2)];
@@ -10137,8 +10765,22 @@ String menuItemName(MenuPage page, uint8_t index)
   }
   if (page == PAGE_MEDIA_SETTINGS) return "Seek Step";
   if (page == PAGE_SCREEN_SETTINGS) {
-    const char *items[] = {"Timeout", "Dim Level", "Brightness"};
-    return items[std::min<uint8_t>(index, 2)];
+    if (index == 0) return "Brightness";
+    if (index == 1) return "Idle Settings";
+    if (index == 2) return "Idle Screen";
+    return "Theme";
+  }
+  if (page == PAGE_IDLE_SCREEN) {
+    if (index < 4) {
+      return screenTimeoutActionText((ScreenTimeoutAction)index);
+    }
+    return "Dim Level";
+  }
+  if (page == PAGE_THEME) {
+    if (index == 0) return "Main Text Colour";
+    if (index == 1) return "Accent Colour";
+    if (index == 2) return "Volume Meters Colour";
+    return "Analog VU Colour";
   }
   return "";
 }
@@ -10157,14 +10799,42 @@ String screenTimeoutText(uint8_t option)
 
 String screenDimText(uint8_t percent)
 {
-  return percent == 0 ? "Screen Off" : String(percent);
+  return String(percent);
+}
+
+String screenTimeoutActionText(ScreenTimeoutAction action)
+{
+  switch (action) {
+    case SCREEN_TIMEOUT_DIM: return "Dim Brightness";
+    case SCREEN_TIMEOUT_OFF: return "Screen Off";
+    case SCREEN_TIMEOUT_DIGITAL_VU: return "Digital VU";
+    case SCREEN_TIMEOUT_ANALOG_VU: return "Analog VU";
+    default: return "Dim Brightness";
+  }
+}
+
+String screenTimeoutCompactText(uint8_t option)
+{
+  switch (option) {
+    case 1: return "30s";
+    case 2: return "1m";
+    case 3: return "3m";
+    case 4: return "5m";
+    default: return "Off";
+  }
+}
+
+String screenTimeoutSummary()
+{
+  if (screenTimeoutOption == 0) return "Off";
+  return screenTimeoutCompactText(screenTimeoutOption) + " / " +
+         screenTimeoutActionText(screenTimeoutAction);
 }
 
 String currentEditValue()
 {
   if (!editActive) return "";
   if (menuPage == PAGE_INPUT) return sourceMenuText((InputSource)editInt);
-  if (menuPage == PAGE_PRESET && menuIndex == 0) return "P" + String(editInt + 1);
   if (menuPage == PAGE_LOUDNESS) {
     if (menuIndex == 0) return editBool ? "On" : "Off";
     return String((int)roundf(editFloat));
@@ -10193,9 +10863,15 @@ String currentEditValue()
     return mediaSeekStepText((uint8_t)editInt);
   }
   if (menuPage == PAGE_SCREEN_SETTINGS) {
-    if (menuIndex == 0) return screenTimeoutText((uint8_t)editInt);
-    if (menuIndex == 1) return screenDimText((uint8_t)editInt);
-    return String(editInt);
+    if (menuIndex == 0) return String(editInt);
+    return screenTimeoutText((uint8_t)editInt);
+  }
+  if (menuPage == PAGE_IDLE_SCREEN) {
+    return screenDimText((uint8_t)editInt);
+  }
+  if (menuPage == PAGE_THEME) {
+    if (menuIndex < 3) return "";
+    return vuColourChoiceText((VuColourChoice)editInt);
   }
   return "";
 }
@@ -10211,12 +10887,7 @@ String menuItemValue(MenuPage page, uint8_t index)
   if (page == PAGE_MEDIA) {
     return mediaBrowserItemTag(index);
   }
-  if (page == PAGE_PRESET) {
-    int8_t first = firstOccupiedPreset();
-    if (first < 0) return "";
-    if (index == 1) return "P" + String((int)dspi.activePreset + 1);
-    return "P" + String((int)displayedPresetSlot() + 1);
-  }
+  if (page == PAGE_PRESET) return "";
   if (page == PAGE_LOUDNESS) {
     if (index == 0) return dspi.loudnessEnabled ? "On" : "Off";
     if (index == 1) return String((int)roundf(dspi.loudnessReferenceSpl));
@@ -10250,16 +10921,25 @@ String menuItemValue(MenuPage page, uint8_t index)
   }
   if (page == PAGE_SYSTEM) {
     if (index == 0) return dspi.connected ? "Ready" : "Fault";
-    if (index == 1) return screenTimeoutText(screenTimeoutOption);
+    if (index == 1) return "Open";
     return String(dspi.masterVolumeDb, 1) + " dB";
   }
   if (page == PAGE_MEDIA_SETTINGS) {
     return mediaSeekStepText(mediaSeekStepIndex);
   }
   if (page == PAGE_SCREEN_SETTINGS) {
-    if (index == 0) return screenTimeoutText(screenTimeoutOption);
-    if (index == 1) return screenDimText(screenDimPercent);
-    return String(brightnessPercent);
+    if (index == 0) return String(brightnessPercent) + "%";
+    if (index == 1) return screenTimeoutText(screenTimeoutOption);
+    if (index == 2) return screenTimeoutActionText(screenTimeoutAction);
+    return "Open";
+  }
+  if (page == PAGE_IDLE_SCREEN) {
+    if (index < 4) return "";
+    return screenDimText(screenDimPercent) + "%";
+  }
+  if (page == PAGE_THEME) {
+    if (index < 3) return "";
+    return vuColourChoiceText(analogVuColourChoice);
   }
   return "";
 }
@@ -10269,8 +10949,8 @@ bool menuValueUsesPercent()
   return (menuPage == PAGE_LOUDNESS && menuIndex == 2) ||
          (menuPage == PAGE_LEVELLER && menuIndex == 1) ||
          (menuPage == PAGE_PSYBASS && menuIndex == 4) ||
-         (menuPage == PAGE_SCREEN_SETTINGS && menuIndex >= 1 &&
-          !(menuIndex == 1 && ((editActive ? editInt : screenDimPercent) == 0)));
+         (menuPage == PAGE_SCREEN_SETTINGS && menuIndex == 0) ||
+         (menuPage == PAGE_IDLE_SCREEN && menuIndex == 4);
 }
 
 const char *menuValueUnit()
@@ -10296,10 +10976,17 @@ void setBacklight(uint8_t level)
   ledcWrite(LCD_BL, level);
 }
 
+uint8_t screenTimeoutBacklightPwm()
+{
+  if (screenTimeoutAction == SCREEN_TIMEOUT_OFF) return 0;
+  return (uint8_t)map(screenDimPercent, 0, 100, 0, BL_MAX);
+}
+
 void applyBrightness()
 {
-  uint8_t percent = screenDimmed ? screenDimPercent : brightnessPercent;
-  uint8_t pwm = (uint8_t)map(percent, 0, 100, 0, BL_MAX);
+  uint8_t pwm = screenDimmed
+      ? screenTimeoutBacklightPwm()
+      : (uint8_t)map(brightnessPercent, 0, 100, 0, BL_MAX);
   backlightFadeActive = false;
   setBacklight(pwm);
 }
@@ -10307,11 +10994,6 @@ void applyBrightness()
 uint8_t uiBrightnessPwm()
 {
   return (uint8_t)map(brightnessPercent, 0, 100, 0, BL_MAX);
-}
-
-uint8_t uiDimPwm()
-{
-  return (uint8_t)map(screenDimPercent, 0, 100, 0, BL_MAX);
 }
 
 uint32_t screenTimeoutMs()
@@ -10345,13 +11027,112 @@ void serviceBacklightFade()
   setBacklight(level);
 }
 
-void recordUserActivity()
+bool recordUserActivity()
 {
   lastUserActivityAt = millis();
+  screenTimeoutVuStableSince = 0;
+  screenTimeoutVuRetryAt = 0;
+
+  // An automatically displayed VU page is a screen saver, not a navigation
+  // change. Restore the exact previous view and consume the first input so a
+  // wake-up turn or button press cannot change volume or activate a menu item.
+  if (screenTimeoutViewActive) {
+    screenTimeoutViewActive = false;
+    uiView = screenTimeoutReturnView;
+    redrawCurrentView();
+    return true;
+  }
+
   if (screenDimmed) {
     screenDimmed = false;
     startBacklightFade(uiBrightnessPwm());
   }
+  return false;
+}
+
+bool screenTimeoutCanReplaceCurrentView()
+{
+  switch (uiView) {
+    case VIEW_FEATURE_CONFIRM:
+    case VIEW_PRESET_SAVE_CONFIRM:
+    case VIEW_CHANGE_OVERLAY:
+    case VIEW_BLE:
+    case VIEW_WIFI_TRANSFER_CONFIRM:
+    case VIEW_WIFI_TRANSFER_ACTIVE:
+    case VIEW_WIFI_TRANSFER_ERROR:
+      return false;
+    default:
+      return true;
+  }
+}
+
+bool screenTimeoutMediaStableForVu()
+{
+  const bool transition = mediaTrackTransitionActive();
+  const bool seeking = mediaPlayerPoc.seeking();
+  const bool lowBuffer = mediaPlayerPoc.active() && mediaPlaybackBufferLow();
+  const MediaPlaybackState state = mediaPlayerPoc.playbackState();
+  const bool playbackStateStable = !mediaPlayerPoc.active() ||
+      state == MediaPlaybackState::Playing ||
+      state == MediaPlaybackState::Paused;
+
+  if (transition || seeking || lowBuffer || !playbackStateStable) {
+    screenTimeoutVuStableSince = 0;
+    screenTimeoutVuRetryAt = millis() + SCREEN_TIMEOUT_VU_RETRY_MS;
+    return false;
+  }
+
+  if (!mediaPlayerPoc.active()) {
+    screenTimeoutVuStableSince = 0;
+    return true;
+  }
+
+  if (screenTimeoutVuStableSince == 0) {
+    screenTimeoutVuStableSince = millis();
+    return false;
+  }
+
+  return (uint32_t)(millis() - screenTimeoutVuStableSince) >=
+         SCREEN_TIMEOUT_VU_STABLE_MS;
+}
+
+void activateScreenTimeoutView(uint8_t pageValue)
+{
+  const VisualizerPage page = static_cast<VisualizerPage>(pageValue);
+  if (uiView == VIEW_VISUALIZER || screenTimeoutViewActive) return;
+  if ((int32_t)(millis() - screenTimeoutVuRetryAt) < 0) return;
+
+  // Enter an automatic full-screen meter only after Media has been outside
+  // seek, transition and low-ring recovery for a bounded stability window.
+  // This closes the race where a track change could begin between the timeout
+  // check and the first full LCD transfer.
+  if (!screenTimeoutMediaStableForVu()) return;
+
+  const VisualizerPage previousPage = visualizerPage;
+  screenTimeoutReturnView = uiView;
+  screenTimeoutViewActive = true;
+  visualizerPage = page;
+  if (page == VISUALIZER_ANALOG) {
+    resetAnalogPeakHold(analogDisplayVuFromDbfs(combinedOutputPeakDbfs()));
+    analogNeedleDb = analogPeakHeldDb;
+    analogNeedleUpdatedAt = millis();
+  } else {
+    clearMeterReadout(nullptr);
+  }
+
+  // Automatic VU entry is best-effort. If the shared LCD/SD SPI bus is busy,
+  // restore the untouched prior view and retry later instead of blocking the
+  // loop task and risking audio starvation.
+  if (!drawVisualizer()) {
+    screenTimeoutViewActive = false;
+    uiView = screenTimeoutReturnView;
+    visualizerPage = previousPage;
+    screenTimeoutVuStableSince = 0;
+    screenTimeoutVuRetryAt = millis() + SCREEN_TIMEOUT_VU_RETRY_MS;
+    return;
+  }
+
+  screenTimeoutVuStableSince = 0;
 }
 
 void serviceScreenPower()
@@ -10362,6 +11143,7 @@ void serviceScreenPower()
   // state or credentials while the SD card is writable.
   if (wifiTransferExclusive()) {
     lastUserActivityAt = millis();
+    screenTimeoutViewActive = false;
     if (screenDimmed) {
       screenDimmed = false;
       startBacklightFade(uiBrightnessPwm());
@@ -10371,10 +11153,20 @@ void serviceScreenPower()
   }
 
   uint32_t timeout = screenTimeoutMs();
-  if (!screenDimmed && timeout != 0 &&
-      (uint32_t)(millis() - lastUserActivityAt) >= timeout) {
-    screenDimmed = true;
-    startBacklightFade(uiDimPwm());
+  const bool expired = timeout != 0 &&
+      (uint32_t)(millis() - lastUserActivityAt) >= timeout;
+
+  if (!screenDimmed && !screenTimeoutViewActive && expired) {
+    if (screenTimeoutAction == SCREEN_TIMEOUT_DIM ||
+        screenTimeoutAction == SCREEN_TIMEOUT_OFF) {
+      screenDimmed = true;
+      startBacklightFade(screenTimeoutBacklightPwm());
+    } else if (screenTimeoutCanReplaceCurrentView()) {
+      activateScreenTimeoutView(
+          screenTimeoutAction == SCREEN_TIMEOUT_ANALOG_VU
+              ? VISUALIZER_ANALOG
+              : VISUALIZER_STEREO);
+    }
   }
   serviceBacklightFade();
 }
@@ -10391,6 +11183,18 @@ bool flushCanvasTryLocked(uint32_t timeoutMs)
   if (!mediaSharedSpiTryLock(timeoutMs)) return false;
   canvas->flush();
   mediaSharedSpiUnlock();
+  return true;
+}
+
+bool flushVisualizerFrame()
+{
+  // Manual VU mode retains its existing rendering behaviour. Only the
+  // automatic idle VU uses a bounded lock attempt so an SD transaction can
+  // never leave the main UI task waiting indefinitely for a full-frame flush.
+  if (screenTimeoutViewActive) {
+    return flushCanvasTryLocked(SCREEN_TIMEOUT_VU_SPI_TRY_MS);
+  }
+  flushCanvasLocked();
   return true;
 }
 
@@ -10544,7 +11348,7 @@ void drawTopStatus()
 {
   String src = sourceText();
   String preset = presetText();
-  drawFontRight(FontMedium, 302, 18, preset, C_WHITE);
+  drawFontRight(FontMedium, 302, 18, preset, uiMainText());
 
   int16_t iconSpan = 0;
   if (dspi.loudnessEnabled) iconSpan += 25;
@@ -10554,37 +11358,37 @@ void drawTopStatus()
   int16_t presetLeft = 302 - fontTextWidth(FontMedium, preset);
   bool useSmall = 18 + fontTextWidth(FontMedium, src) + 12 + iconSpan > presetLeft - 8;
   const FontDef &sourceFont = useSmall ? FontSmall : FontMedium;
-  drawFontText(sourceFont, 18, useSmall ? 22 : 18, src, C_WHITE);
+  drawFontText(sourceFont, 18, useSmall ? 22 : 18, src, uiMainText());
 
   int16_t iconX = 18 + fontTextWidth(sourceFont, src) + 12;
   int16_t iconY = 22;
   if (dspi.loudnessEnabled) {
-    drawEarIcon(iconX, iconY, C_WHITE);
+    drawEarIcon(iconX, iconY, uiMainText());
     iconX += 25;
   }
   if (dspi.crossfeedEnabled) {
-    drawHeadphonesIcon(iconX, iconY, C_WHITE);
+    drawHeadphonesIcon(iconX, iconY, uiMainText());
     iconX += 27;
   }
   if (dspi.levellerEnabled) {
-    drawLevellerIcon(iconX, iconY, C_WHITE);
+    drawLevellerIcon(iconX, iconY, uiMainText());
     iconX += 26;
   }
   if (dspi.psybassSupported && dspi.psybassEnabled) {
-    drawPsybassIcon(iconX, iconY, C_WHITE);
+    drawPsybassIcon(iconX, iconY, uiMainText());
   }
 }
 
 void drawDbLabel(int16_t x, int16_t y)
 {
-  drawFontText(FontDb, x, y, "dB", C_WHITE);
+  drawFontText(FontDb, x, y, "dB", uiMainText());
 }
 
 void drawRoundDecimalPoint(int16_t x, int16_t y)
 {
-  uint16_t glow = blend565(C_BLACK, C_WHITE, 72);
+  uint16_t glow = blend565(C_BLACK, uiMainText(), 72);
   canvas->fillCircle(x, y, 4, glow);
-  canvas->fillCircle(x, y, 3, C_WHITE);
+  canvas->fillCircle(x, y, 3, uiMainText());
 }
 
 void drawVolumeTextCustom(int16_t x, int16_t y, const String &text, uint16_t colour)
@@ -10629,7 +11433,7 @@ int16_t volumeTextWidthCustom(const String &text)
 void drawVolumeNumber(int16_t y)
 {
   if (dspi.muted) {
-    drawFontCentred(FontLarge, y, "Mute", C_WHITE);
+    drawFontCentred(FontLarge, y, "Mute", uiMainText());
     return;
   }
 
@@ -10641,23 +11445,22 @@ void drawVolumeNumber(int16_t y)
   if (fabs(dspi.volumeDb) < 10.0f) volX -= 12;
   if (volX < 8) volX = 8;
 
-  uint16_t glow = blend565(C_BLACK, C_WHITE, 108);
+  uint16_t glow = blend565(C_BLACK, uiMainText(), 108);
   drawVolumeTextCustom(volX - 1, y, value, glow);
   drawVolumeTextCustom(volX + 1, y, value, glow);
   drawVolumeTextCustom(volX, y - 1, value, glow);
   drawVolumeTextCustom(volX, y + 1, value, glow);
   drawVolumeTextCustom(volX + 1, y + 1, value, glow);
-  drawVolumeTextCustom(volX, y, value, C_WHITE);
+  drawVolumeTextCustom(volX, y, value, uiMainText());
   drawDbLabel(dbX, y + 52);
 }
 
 void drawAudioMeta(int16_t y)
 {
-  uint16_t colour = C_WHITE;
-  if (mediaPlayerPoc.active()) colour = C_CYAN;
-  else if (!dspi.connected) colour = C_RED;
+  uint16_t colour = uiAccent();
+  if (!dspi.connected) colour = uiFault();
   else if ((isSpdifSource(dspi.source) && dspi.spdifState != 2) ||
-           (dspi.source == SRC_ADAT && dspi.adatState != 3)) colour = C_ORANGE;
+           (dspi.source == SRC_ADAT && dspi.adatState != 3)) colour = uiWarning();
   drawFontCentred(FontMedium, y, audioMetaText(), colour);
 }
 
@@ -10673,11 +11476,27 @@ uint16_t mix565(uint16_t a, uint16_t b, uint8_t amount)
 
 uint16_t meterGradientColour(uint16_t x, uint16_t maxWidth)
 {
-  if (maxWidth == 0) return C_CYAN_SOFT;
+  if (maxWidth == 0) {
+    return volumeMeterPaletteIndex == PALETTE_CYAN
+        ? C_CYAN_SOFT : blend565(C_BLACK, uiVolumeMeterColour(), 200);
+  }
   uint16_t pos = (x * 1000UL) / maxWidth;
-  if (pos < 500) return C_CYAN;
-  if (pos < 820) return mix565(C_CYAN, C_ORANGE, (uint8_t)(((pos - 500) * 255UL) / 320UL));
-  return mix565(C_ORANGE, C_RED, (uint8_t)(((pos - 820) * 255UL) / 180UL));
+  if (volumeMeterPaletteIndex == PALETTE_CYAN) {
+    if (pos < 500) return C_CYAN;
+    if (pos < 820) return mix565(C_CYAN, C_ORANGE,
+        (uint8_t)(((pos - 500) * 255UL) / 320UL));
+    return mix565(C_ORANGE, C_RED,
+        (uint8_t)(((pos - 820) * 255UL) / 180UL));
+  }
+
+  const uint16_t vu = uiVolumeMeterColour();
+  if (pos < 500) {
+    return blend565(C_BLACK, vu, (uint8_t)(150 + (pos * 105UL) / 500UL));
+  }
+  if (pos < 820) return mix565(vu, uiWarning(),
+      (uint8_t)(((pos - 500) * 255UL) / 320UL));
+  return mix565(uiWarning(), uiClip(),
+      (uint8_t)(((pos - 820) * 255UL) / 180UL));
 }
 
 float peakToMeterWidth(uint16_t peak, float fullWidth)
@@ -10884,12 +11703,125 @@ void drawAnalogVuLockedFace()
                 "Analogue VU bitmap height must match the 240px canvas");
 
   // The approved RGB565 face is restored in full before every needle frame.
+  // Custom colours come from a persistent pre-tinted PSRAM bitmap, so this is
+  // the same one-copy runtime path as the original cyan face.
+  // ANALOG_VU_FACE_320X240 remains the bit-exact cyan source and fallback.
+  const uint16_t *face = analogVuFaceForCurrentColour();
   canvas->draw16bitRGBBitmap(
       0,
       0,
-      const_cast<uint16_t *>(ANALOG_VU_FACE_320X240),
+      const_cast<uint16_t *>(face),
       ANALOG_VU_FACE_WIDTH,
       ANALOG_VU_FACE_HEIGHT);
+}
+
+uint16_t themedAnalogVuFacePixel(uint16_t source)
+{
+  if (analogVuColourChoice == VU_COLOUR_CYAN) return source;
+
+  const uint8_t sourceR5 = (source >> 11) & 0x1F;
+  const uint8_t sourceG6 = (source >> 5) & 0x3F;
+  const uint8_t sourceB5 = source & 0x1F;
+  const uint8_t sourceR = (sourceR5 << 3) | (sourceR5 >> 2);
+  const uint8_t sourceG = (sourceG6 << 2) | (sourceG6 >> 4);
+  const uint8_t sourceB = (sourceB5 << 3) | (sourceB5 >> 2);
+  const uint8_t sourceCool = std::max<uint8_t>(sourceG, sourceB);
+  const uint8_t sourceValue = std::max<uint8_t>(sourceR, sourceCool);
+
+  // Neutral black curves, scale marks and face text have no cool chroma and
+  // remain bit-for-bit untouched. Partially neutral antialiasing blends only
+  // in proportion to the original face colour, retaining its lighting.
+  if (sourceValue == 0 || sourceCool <= sourceR) return source;
+  const uint8_t chroma = sourceCool - sourceR;
+  const float chromaRatio = (float)chroma / (float)sourceValue;
+  // A square-root transition removes the visible boundary that a linear
+  // saturation threshold produced between neighbouring face-shading layers.
+  const uint8_t strength = (uint8_t)constrain(
+      64 + (int)lroundf(sqrtf(chromaRatio) * 191.0f), 64, 255);
+
+  // Compress only chromatic highlights. Neutral white scale text is returned
+  // above unchanged, while the bright face centre keeps detail instead of
+  // flattening into a washed-out white patch.
+  const uint8_t tonedValue = sourceValue <= 192
+      ? sourceValue : (uint8_t)(192 + ((sourceValue - 192) * 2U) / 5U);
+  const uint8_t tonedSourceR = ((uint16_t)sourceR * tonedValue) / sourceValue;
+  const uint8_t tonedSourceG = ((uint16_t)sourceG * tonedValue) / sourceValue;
+  const uint8_t tonedSourceB = ((uint16_t)sourceB * tonedValue) / sourceValue;
+
+  const uint16_t selected = uiAnalogVuColour();
+  const uint8_t selectedR5 = (selected >> 11) & 0x1F;
+  const uint8_t selectedG6 = (selected >> 5) & 0x3F;
+  const uint8_t selectedB5 = selected & 0x1F;
+  const uint8_t selectedR = (selectedR5 << 3) | (selectedR5 >> 2);
+  const uint8_t selectedG = (selectedG6 << 2) | (selectedG6 >> 4);
+  const uint8_t selectedB = (selectedB5 << 3) | (selectedB5 >> 2);
+  const uint8_t selectedValue = std::max<uint8_t>(
+      selectedR, std::max<uint8_t>(selectedG, selectedB));
+  if (selectedValue == 0) return source;
+
+  const uint8_t targetR = ((uint16_t)selectedR * tonedValue) / selectedValue;
+  const uint8_t targetG = ((uint16_t)selectedG * tonedValue) / selectedValue;
+  const uint8_t targetB = ((uint16_t)selectedB * tonedValue) / selectedValue;
+  const uint8_t resultR = ((uint16_t)tonedSourceR * (255U - strength) +
+                           (uint16_t)targetR * strength) / 255U;
+  const uint8_t resultG = ((uint16_t)tonedSourceG * (255U - strength) +
+                           (uint16_t)targetG * strength) / 255U;
+  const uint8_t resultB = ((uint16_t)tonedSourceB * (255U - strength) +
+                           (uint16_t)targetB * strength) / 255U;
+  return ((uint16_t)(resultR >> 3) << 11) |
+         ((uint16_t)(resultG >> 2) << 5) |
+         (uint16_t)(resultB >> 3);
+}
+
+bool prepareAnalogVuFaceCache()
+{
+  if (analogVuColourChoice == VU_COLOUR_CYAN) return true;
+  const uint8_t requested = (uint8_t)analogVuColourChoice;
+  if (analogVuFaceCache && analogVuFaceCacheChoice == requested) return true;
+  if (analogVuFaceCacheAllocationFailed) return false;
+
+  const uint32_t pixelCount = (uint32_t)ANALOG_VU_FACE_WIDTH *
+                              ANALOG_VU_FACE_HEIGHT;
+  if (!analogVuFaceCache) {
+    analogVuFaceCache = static_cast<uint16_t *>(heap_caps_malloc(
+        pixelCount * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  if (!analogVuFaceCache) {
+    analogVuFaceCacheAllocationFailed = true;
+    if (!analogVuFaceCacheWarningPrinted) {
+      Serial.println("ANALOG VU: PSRAM face cache unavailable; using cyan face");
+      analogVuFaceCacheWarningPrinted = true;
+    }
+    return false;
+  }
+
+  // This is the only full-face colour transform. It runs once when the
+  // selected analogue colour changes, never from the live needle frame path.
+  for (uint32_t i = 0; i < pixelCount; i++) {
+    const uint16_t source = pgm_read_word(&ANALOG_VU_FACE_320X240[i]);
+    analogVuFaceCache[i] = themedAnalogVuFacePixel(source);
+  }
+  analogVuFaceCacheChoice = requested;
+  analogVuFaceCacheWarningPrinted = false;
+  Serial.printf("ANALOG VU: cached colour=%s bytes=%lu\n",
+                vuColourChoiceText(analogVuColourChoice).c_str(),
+                (unsigned long)(pixelCount * sizeof(uint16_t)));
+  return true;
+}
+
+const uint16_t *analogVuFaceForCurrentColour()
+{
+  if (analogVuColourChoice == VU_COLOUR_CYAN) {
+    return ANALOG_VU_FACE_320X240;
+  }
+  return prepareAnalogVuFaceCache()
+      ? analogVuFaceCache : ANALOG_VU_FACE_320X240;
+}
+
+void applyAnalogVuFaceColour()
+{
+  // Compatibility marker for the locked analogue-render order. Colour is
+  // already present in the cached face selected by drawAnalogVuLockedFace().
 }
 
 void drawAnalogVuNeedle()
@@ -10919,15 +11851,16 @@ void drawAnalogVuNeedle()
   canvas->drawCircle(pivotX, pivotY, 7, needle);
 }
 
-void drawAnalogVisualizer()
+bool drawAnalogVisualizer()
 {
   uiView = VIEW_VISUALIZER;
 
   // Restore the complete locked face before drawing the moving needle. This
   // erases the previous pointer without redrawing any static face element.
   drawAnalogVuLockedFace();
+  applyAnalogVuFaceColour();
   drawAnalogVuNeedle();
-  flushCanvasLocked();
+  return flushVisualizerFrame();
 }
 
 void drawGradientBar(int16_t x, int16_t y, int16_t activeW, int16_t trailW, int16_t fullW, int16_t h)
@@ -10956,7 +11889,7 @@ void drawLevelBars()
   const int16_t y2 = 223;
 
   canvas->setTextSize(1);
-  canvas->setTextColor(C_WHITE);
+  canvas->setTextColor(uiMainText());
   canvas->setCursor(8, y1 - 1); canvas->print("L");
   canvas->setCursor(8, y2 - 1); canvas->print("R");
 
@@ -10965,7 +11898,7 @@ void drawLevelBars()
 
   if (outputClipActive()) {
     canvas->setCursor(295, 216);
-    canvas->setTextColor(C_RED);
+    canvas->setTextColor(uiClip());
     canvas->print("OVR");
   }
 }
@@ -10973,20 +11906,20 @@ void drawLevelBars()
 void drawFontCentredGlow(const FontDef &font, int16_t y, const String &text)
 {
   int16_t x = std::max<int16_t>(0, (UI_W - fontTextWidth(font, text)) / 2);
-  uint16_t glow = blend565(C_BLACK, C_WHITE, 58);
+  uint16_t glow = blend565(C_BLACK, uiMainText(), 58);
   drawFontText(font, x + 1, y, text, glow);
   drawFontText(font, x, y + 1, text, glow);
-  drawFontText(font, x, y, text, C_WHITE);
+  drawFontText(font, x, y, text, uiMainText());
 }
 
 void drawMenuOptionCentredGlow(int16_t y, const String &text)
 {
   const FontDef &font = fontTextWidth(FontMedium, text) <= UI_W - 16 ? FontMedium : FontSmall;
   int16_t x = std::max<int16_t>(0, (UI_W - fontTextWidth(font, text)) / 2);
-  uint16_t glow = blend565(C_BLACK, C_WHITE, 72);
+  uint16_t glow = blend565(C_BLACK, uiMainText(), 72);
   drawFontText(font, x + 1, y, text, glow);
   drawFontText(font, x, y + 1, text, glow);
-  drawFontText(font, x, y, text, C_WHITE);
+  drawFontText(font, x, y, text, uiMainText());
 }
 
 void drawFontCentredGlowColour(const FontDef &font, int16_t y, const String &text, uint16_t colour)
@@ -11015,8 +11948,8 @@ void drawMenuDots(uint8_t count, uint8_t selected)
   for (uint8_t i = 0; i < count; i++) {
     int16_t x = startX + i * spacing;
     if (i == selected) {
-      canvas->fillCircle(x, y, 4, blend565(C_BLACK, C_CYAN, 72));
-      canvas->fillCircle(x, y, 3, C_CYAN);
+      canvas->fillCircle(x, y, 4, blend565(C_BLACK, uiAccent(), 72));
+      canvas->fillCircle(x, y, 3, uiAccent());
     } else {
       canvas->fillCircle(x, y, 2, C_LINE);
     }
@@ -11033,8 +11966,8 @@ void drawVerticalMenuDots(uint8_t count, uint8_t selected)
   for (uint8_t i = 0; i < count; i++) {
     int16_t y = startY + i * spacing;
     if (i == selected) {
-      canvas->fillCircle(x, y, 4, blend565(C_BLACK, C_CYAN, 72));
-      canvas->fillCircle(x, y, 3, C_CYAN);
+      canvas->fillCircle(x, y, 4, blend565(C_BLACK, uiAccent(), 72));
+      canvas->fillCircle(x, y, 3, uiAccent());
     } else {
       canvas->fillCircle(x, y, 2, C_LINE);
     }
@@ -11068,10 +12001,32 @@ void drawFixedVolumeLimitValue(int16_t y, const String &value, uint16_t colour)
   drawFontText(FontDb, dbX, y + 50, "dB", colour);
 }
 
+void drawPaletteSwatchEditor(int16_t y)
+{
+  const uint8_t selected = (uint8_t)constrain(
+      editInt, 0, THEME_PALETTE_COUNT - 1);
+  const uint16_t colour = themePaletteColour(selected);
+  const int16_t centreY = y + 35;
+  canvas->fillCircle(UI_W / 2, centreY, 34, colour);
+  canvas->drawCircle(UI_W / 2, centreY, 35, uiMainText());
+
+  // The three smaller swatches show the complete shade family without adding
+  // colour-name text. The active shade has a bright outer ring.
+  const uint8_t familyFirst =
+      (selected / THEME_PALETTE_SHADE_COUNT) * THEME_PALETTE_SHADE_COUNT;
+  for (uint8_t shade = 0; shade < THEME_PALETTE_SHADE_COUNT; shade++) {
+    const int16_t x = UI_W / 2 - 34 + shade * 34;
+    const uint8_t paletteIndex = familyFirst + shade;
+    canvas->fillCircle(x, y + 88, 8, themePaletteColour(paletteIndex));
+    canvas->drawCircle(x, y + 88, paletteIndex == selected ? 10 : 9,
+                       paletteIndex == selected ? uiMainText() : uiDimText());
+  }
+}
+
 void drawMenuValue(int16_t y, const String &value)
 {
   bool selectedForEdit = editActive && menuPage != PAGE_MAIN;
-  uint16_t valueColour = selectedForEdit ? C_CYAN : C_WHITE;
+  uint16_t valueColour = selectedForEdit ? uiAccent() : uiMainText();
 
   if (menuPage == PAGE_INPUT) {
     // FontMenu intentionally contains only the glyphs needed by the main
@@ -11084,6 +12039,17 @@ void drawMenuValue(int16_t y, const String &value)
 
   if (menuPage == PAGE_SYSTEM && menuIndex == 2) {
     drawFixedVolumeLimitValue(y, value, valueColour);
+    return;
+  }
+
+  if (menuPage == PAGE_THEME && menuIndex < 3) {
+    drawPaletteSwatchEditor(y);
+    return;
+  }
+
+  // Analog VU retains its compact named set and fixed text size.
+  if (menuPage == PAGE_THEME) {
+    drawFontCentredGlowColour(FontMedium, y + 27, value, valueColour);
     return;
   }
 
@@ -11114,53 +12080,25 @@ void drawMenuValue(int16_t y, const String &value)
   }
 }
 
-void drawPresetMenuValue()
-{
-  uint8_t slot = displayedPresetSlot();
-  String slotLabel = "P" + String((int)slot + 1);
-  String customName = presetName(slot);
-  uint16_t nameColour = editActive ? C_CYAN : C_WHITE;
-
-  if (customName.length()) {
-    // The Console-owned name is the primary preset identity. Scale the large
-    // native font to the available width so useful names such as
-    // "Speakers and sub" remain prominent, white and fully readable.
-    const int16_t maximumWidth = UI_W - 28;
-    int16_t unscaledWidth = fontTextWidthKerned(FontLarge, customName);
-    uint8_t scalePercent = unscaledWidth > 0
-      ? (uint8_t)std::min<int16_t>(58, (maximumWidth * 100L) / unscaledWidth)
-      : 58;
-
-    if (scalePercent >= 34) {
-      int16_t scaledWidth = fontTextWidthScaledKerned(FontLarge, customName, scalePercent);
-      int16_t x = std::max<int16_t>(0, (UI_W - scaledWidth) / 2);
-      uint16_t glow = blend565(C_BLACK, nameColour, 74);
-      drawFontTextScaledKerned(FontLarge, x + 1, 91, customName, glow, scalePercent);
-      drawFontTextScaledKerned(FontLarge, x, 92, customName, glow, scalePercent);
-      drawFontTextScaledKerned(FontLarge, x, 91, customName, nameColour, scalePercent);
-    } else if (fontTextWidth(FontMedium, customName) <= maximumWidth) {
-      drawFontCentredGlowColour(FontMedium, 107, customName, nameColour);
-    } else {
-      drawFontCentredGlowColour(FontSmall, 112, customName, nameColour);
-    }
-
-    // The internal Pico slot is supporting information rather than the title.
-    drawFontCentredGlowColour(FontMedium, 157, slotLabel, C_WHITE);
-  } else {
-    // Generic or unnamed slots still have an obvious selection value.
-    drawFontCentredGlowColour(FontMedium, 116, slotLabel,
-                              editActive ? C_CYAN : C_WHITE);
-  }
-}
-
 uint16_t visualizerSegmentColour(uint8_t segmentFromBottom)
 {
   uint16_t pos = (uint16_t)segmentFromBottom * 1000U / (VISUALIZER_SEGMENT_COUNT - 1U);
-  if (pos < 240) return mix565(C_CYAN, C_BLUE, (uint8_t)((pos * 255U) / 240U));
-  if (pos < 470) return mix565(C_BLUE, C_PURPLE, (uint8_t)(((pos - 240U) * 255U) / 230U));
-  if (pos < 680) return mix565(C_PURPLE, C_MAGENTA, (uint8_t)(((pos - 470U) * 255U) / 210U));
-  if (pos < 850) return mix565(C_MAGENTA, C_ORANGE, (uint8_t)(((pos - 680U) * 255U) / 170U));
-  return mix565(C_ORANGE, C_RED, (uint8_t)(((pos - 850U) * 255U) / 150U));
+  if (volumeMeterPaletteIndex == PALETTE_CYAN) {
+    if (pos < 240) return mix565(C_CYAN, C_BLUE, (uint8_t)((pos * 255U) / 240U));
+    if (pos < 470) return mix565(C_BLUE, C_PURPLE, (uint8_t)(((pos - 240U) * 255U) / 230U));
+    if (pos < 680) return mix565(C_PURPLE, C_MAGENTA, (uint8_t)(((pos - 470U) * 255U) / 210U));
+    if (pos < 850) return mix565(C_MAGENTA, C_ORANGE, (uint8_t)(((pos - 680U) * 255U) / 170U));
+    return mix565(C_ORANGE, C_RED, (uint8_t)(((pos - 850U) * 255U) / 150U));
+  }
+
+  const uint16_t vu = uiVolumeMeterColour();
+  if (pos < 680) {
+    return blend565(C_BLACK, vu, (uint8_t)(96 + (pos * 159UL) / 680UL));
+  }
+  if (pos < 850) return mix565(vu, uiWarning(),
+      (uint8_t)(((pos - 680U) * 255U) / 170U));
+  return mix565(uiWarning(), uiClip(),
+      (uint8_t)(((pos - 850U) * 255U) / 150U));
 }
 
 void drawStereoVuColumn(int16_t x, float activeWidth, float trailWidth)
@@ -11193,7 +12131,7 @@ void drawStereoVuColumn(int16_t x, float activeWidth, float trailWidth)
   }
 }
 
-void drawStereoVisualizer()
+bool drawStereoVisualizer()
 {
   uiView = VIEW_VISUALIZER;
   drawBase();
@@ -11220,33 +12158,33 @@ void drawStereoVisualizer()
   }
   int16_t scaledWidth = fontTextWidthScaledKerned(FontLarge, volume, scalePercent);
   int16_t volumeX = (UI_W - scaledWidth) / 2;
-  uint16_t glow = blend565(C_BLACK, C_WHITE, 82);
+  uint16_t glow = blend565(C_BLACK, uiMainText(), 82);
   drawFontTextScaledKerned(FontLarge, volumeX + 1, 70, volume, glow, scalePercent);
-  drawFontTextScaledKerned(FontLarge, volumeX, 70, volume, C_WHITE, scalePercent);
-  drawFontCentredGlowColour(FontSmall, 139, "dB", C_WHITE);
-  if (dspi.muted) drawFontCentredGlowColour(FontSmall, 169, "Mute", C_ORANGE);
+  drawFontTextScaledKerned(FontLarge, volumeX, 70, volume, uiMainText(), scalePercent);
+  drawFontCentredGlowColour(FontSmall, 139, "dB", uiMainText());
+  if (dspi.muted) drawFontCentredGlowColour(FontSmall, 169, "Mute", uiWarning());
 
   int16_t leftLabelX = leftX + (meterW - fontTextWidth(FontMedium, "L")) / 2;
   int16_t rightLabelX = rightX + (meterW - fontTextWidth(FontMedium, "R")) / 2;
-  drawFontText(FontMedium, leftLabelX, 207, "L", C_WHITE);
-  drawFontText(FontMedium, rightLabelX, 207, "R", C_WHITE);
+  drawFontText(FontMedium, leftLabelX, 207, "L", uiMainText());
+  drawFontText(FontMedium, rightLabelX, 207, "R", uiMainText());
 
-  flushCanvasLocked();
+  return flushVisualizerFrame();
 }
 
-void drawVisualizer()
+bool drawVisualizer()
 {
-  if (visualizerPage == VISUALIZER_ANALOG) drawAnalogVisualizer();
-  else drawStereoVisualizer();
+  if (visualizerPage == VISUALIZER_ANALOG) return drawAnalogVisualizer();
+  return drawStereoVisualizer();
 }
 
 void drawFeatureConfirmation()
 {
   uiView = VIEW_FEATURE_CONFIRM;
   drawBase();
-  drawMenuTextNative(20, featureConfirmName, C_WHITE);
+  drawMenuTextNative(20, featureConfirmName, uiMainText());
   drawFontCentredGlowColour(FontLarge, 108,
-                            featureConfirmEnabled ? "On" : "Off", C_WHITE);
+                            featureConfirmEnabled ? "On" : "Off", uiMainText());
   flushCanvasLocked();
 }
 
@@ -11259,6 +12197,12 @@ void showFeatureConfirmation(const char *featureName, bool enabled)
   drawFeatureConfirmation();
 }
 
+void showFeatureStateNotification(const char *featureName, bool enabled)
+{
+  if (uiView != VIEW_HOME) return;
+  showFeatureConfirmation(featureName, enabled);
+}
+
 void drawChangeOverlay()
 {
   uiView = VIEW_CHANGE_OVERLAY;
@@ -11269,10 +12213,10 @@ void drawChangeOverlay()
     const uint8_t slotScale = 52;
     int16_t slotWidth = fontTextWidthScaledKerned(FontLarge, slot, slotScale);
     int16_t slotX = std::max<int16_t>(0, (UI_W - slotWidth) / 2);
-    uint16_t slotGlow = blend565(C_BLACK, C_WHITE, 82);
+    uint16_t slotGlow = blend565(C_BLACK, uiMainText(), 82);
     drawFontTextScaledKerned(FontLarge, slotX + 1, 0, slot, slotGlow, slotScale);
-    drawFontTextScaledKerned(FontLarge, slotX, 0, slot, C_WHITE, slotScale);
-    drawTaperLine(UI_W / 2, 58, 196, 1, C_CYAN_DARK);
+    drawFontTextScaledKerned(FontLarge, slotX, 0, slot, uiMainText(), slotScale);
+    drawTaperLine(UI_W / 2, 58, 196, 1, uiAccentDark());
 
     String name = presetName(changeOverlayPreset);
     if (!name.length()) name = "Preset " + String((int)changeOverlayPreset + 1);
@@ -11285,22 +12229,22 @@ void drawChangeOverlay()
     if (scalePercent >= 34) {
       int16_t scaledWidth = fontTextWidthScaledKerned(FontLarge, name, scalePercent);
       int16_t x = std::max<int16_t>(0, (UI_W - scaledWidth) / 2);
-      uint16_t glow = blend565(C_BLACK, C_WHITE, 74);
+      uint16_t glow = blend565(C_BLACK, uiMainText(), 74);
       drawFontTextScaledKerned(FontLarge, x + 1, 82, name, glow, scalePercent);
       drawFontTextScaledKerned(FontLarge, x, 83, name, glow, scalePercent);
-      drawFontTextScaledKerned(FontLarge, x, 82, name, C_WHITE, scalePercent);
+      drawFontTextScaledKerned(FontLarge, x, 82, name, uiMainText(), scalePercent);
     } else if (fontTextWidth(FontMedium, name) <= maximumWidth) {
-      drawFontCentredGlowColour(FontMedium, 105, name, C_WHITE);
+      drawFontCentredGlowColour(FontMedium, 105, name, uiMainText());
     } else {
-      drawFontCentredGlowColour(FontSmall, 114, name, C_WHITE);
+      drawFontCentredGlowColour(FontSmall, 114, name, uiMainText());
     }
   } else {
-    drawFontCentredGlowColour(FontSmall, 24, "Input", C_CYAN);
+    drawFontCentredGlowColour(FontSmall, 24, "Input", uiAccent());
     String source = inputSourceDisplayText(changeOverlaySource);
     if (fontTextWidth(FontLarge, source) <= UI_W - 20) {
-      drawFontCentredGlowColour(FontLarge, 91, source, C_WHITE);
+      drawFontCentredGlowColour(FontLarge, 91, source, uiMainText());
     } else {
-      drawFontCentredGlowColour(FontMedium, 119, source, C_WHITE);
+      drawFontCentredGlowColour(FontMedium, 119, source, uiMainText());
     }
   }
   flushCanvasLocked();
@@ -11309,6 +12253,7 @@ void drawChangeOverlay()
 void showPresetChangeOverlay(uint8_t slot)
 {
   if (slot >= 10) return;
+  queuedSourceOverlay = false;
   changeOverlayKind = CHANGE_OVERLAY_PRESET;
   changeOverlayPreset = slot;
   changeOverlayUntil = millis() + CHANGE_OVERLAY_MS;
@@ -11317,15 +12262,31 @@ void showPresetChangeOverlay(uint8_t slot)
 
 void showSourceChangeOverlay(InputSource source)
 {
+  queuedSourceOverlay = false;
   changeOverlayKind = CHANGE_OVERLAY_SOURCE;
   changeOverlaySource = source;
   changeOverlayUntil = millis() + CHANGE_OVERLAY_MS;
   drawChangeOverlay();
 }
 
+void queueSourceChangeAfterPreset(InputSource source)
+{
+  if (uiView != VIEW_CHANGE_OVERLAY ||
+      changeOverlayKind != CHANGE_OVERLAY_PRESET) return;
+  queuedSourceOverlay = true;
+  queuedSourceOverlayValue = source;
+  changeOverlayUntil = millis() + PRESET_INPUT_CHANGE_OVERLAY_MS;
+}
+
 void dismissChangeOverlay()
 {
   if (uiView != VIEW_CHANGE_OVERLAY) return;
+  if (changeOverlayKind == CHANGE_OVERLAY_PRESET && queuedSourceOverlay) {
+    const InputSource source = queuedSourceOverlayValue;
+    queuedSourceOverlay = false;
+    showSourceChangeOverlay(source);
+    return;
+  }
   changeOverlayKind = CHANGE_OVERLAY_NONE;
   changeOverlayUntil = 0;
   drawHome();
@@ -11335,29 +12296,61 @@ void drawPresetSaveConfirmation()
 {
   uiView = VIEW_PRESET_SAVE_CONFIRM;
   drawBase();
-  drawFontCentredGlow(FontMedium, 8, "Save Current");
-  drawTaperLine(UI_W / 2, 44, 220, 1, C_CYAN_DARK);
+  drawFontCentredGlow(FontMedium, 8, "Save Preset");
+  drawTaperLine(UI_W / 2, 44, 220, 1, uiAccentDark());
 
-  String slot = "P" + String((int)dspi.activePreset + 1);
-  String name = presetName(dspi.activePreset);
-  if (!name.length()) name = "Preset " + String((int)dspi.activePreset + 1);
-  drawFontCentredGlowColour(FontMedium, 62, slot, C_WHITE);
+  const uint8_t destination = std::min<uint8_t>(presetSaveDestination, 9);
+  const bool occupied = isPresetOccupied(destination);
+  String slot = "P" + String((int)destination + 1);
+  String name = presetName(destination);
+  if (!name.length()) {
+    name = occupied ? "Preset " + String((int)destination + 1)
+                    : "Empty slot";
+  }
+  drawFontCentredGlowColour(FontMedium, 62, slot, uiMainText());
   const FontDef &nameFont = fontTextWidth(FontMedium, name) <= UI_W - 20
                           ? FontMedium : FontSmall;
   drawFontCentredGlowColour(nameFont, nameFont.lineHeight > 30 ? 105 : 119,
-                            name, C_WHITE);
-  drawFontCentredGlowColour(FontSmall, 165, "Overwrite preset?", C_DIM);
+                            name, uiMainText());
+  drawFontCentredGlowColour(FontSmall, 165,
+                            occupied ? "Overwrite preset?"
+                                     : "Save to empty slot?",
+                            uiDimText());
   drawFontCentredGlowColour(FontMedium, 190,
-                            presetSaveConfirmYes ? "Yes" : "No", C_CYAN);
+                            presetSaveConfirmYes ? "Yes" : "No", uiAccent());
   flushCanvasLocked();
 }
 
-void beginPresetSaveConfirmation()
+void beginPresetSaveConfirmation(uint8_t destinationSlot)
 {
+  presetSaveDestination = std::min<uint8_t>(destinationSlot, 9);
   presetSaveConfirmYes = false;
   fadeUiOut();
   drawPresetSaveConfirmation();
   fadeUiIn();
+}
+
+void beginHighlightedPresetSave()
+{
+  const bool mediaSessionPresent = mediaPlayerPoc.active() ||
+      mediaPlaybackSuspended || mediaCurrentPath[0] ||
+      mediaTrackTransitionActive();
+  if (mediaSessionPresent) {
+    stopMediaPlayback("preset save hold");
+    if (mediaPlayerPoc.active() || mediaTrackTransitionActive() ||
+        mediaRouteRestorePending) {
+      showToast("Music stop failed");
+      drawMenu();
+      return;
+    }
+  }
+
+  if (presetSaveCompletionPending) {
+    showToast("Save in progress");
+    drawMenu();
+  } else {
+    beginPresetSaveConfirmation(menuIndex);
+  }
 }
 
 void drawWifiTransferConfirmation()
@@ -11365,23 +12358,23 @@ void drawWifiTransferConfirmation()
   uiView = VIEW_WIFI_TRANSFER_CONFIRM;
   drawBase();
   drawFontCentredGlow(FontMedium, 8, "WI-FI TRANSFER");
-  drawTaperLine(UI_W / 2, 44, 238, 1, C_CYAN_DARK);
-  drawFontCentredGlowColour(FontSmall, 60, "Playback will stop", C_WHITE);
+  drawTaperLine(UI_W / 2, 44, 238, 1, uiAccentDark());
+  drawFontCentredGlowColour(FontSmall, 60, "Playback will stop", uiMainText());
   drawFontCentredGlowColour(FontSmall, 86,
-                            "BLE remote will disconnect", C_WHITE);
+                            "BLE remote will disconnect", uiMainText());
   drawFontCentredGlowColour(FontSmall, 112, "Do not remove power", C_BLUE);
 
-  const uint16_t startColour = wifiTransferConfirmStart ? C_WHITE : C_DIM;
-  const uint16_t cancelColour = wifiTransferConfirmStart ? C_DIM : C_WHITE;
+  const uint16_t startColour = wifiTransferConfirmStart ? uiMainText() : uiDimText();
+  const uint16_t cancelColour = wifiTransferConfirmStart ? uiDimText() : uiMainText();
   if (wifiTransferConfirmStart) {
-    canvas->fillRect(32, 160, 4, 37, C_WHITE);
+    canvas->fillRect(32, 160, 4, 37, uiMainText());
   } else {
-    canvas->fillRect(178, 160, 4, 37, C_WHITE);
+    canvas->fillRect(178, 160, 4, 37, uiMainText());
   }
   drawFontText(FontMedium, 46, 161, "START", startColour);
   drawFontText(FontMedium, 193, 161, "CANCEL", cancelColour);
   drawFontCentredGlowColour(FontSmall, 211,
-                            "Left / Right, then Select", C_DIM);
+                            "Left / Right, then Select", uiDimText());
   flushCanvasLocked();
 }
 
@@ -11399,32 +12392,32 @@ void drawWifiTransferScreen()
   uiView = VIEW_WIFI_TRANSFER_ACTIVE;
   drawBase();
   drawFontCentredGlow(FontMedium, 1, "WI-FI TRANSFER");
-  drawTaperLine(UI_W / 2, 35, 238, 1, C_CYAN_DARK);
-  drawFontCentredGlowColour(FontSmall, 42, "Network", C_DIM);
+  drawTaperLine(UI_W / 2, 35, 238, 1, uiAccentDark());
+  drawFontCentredGlowColour(FontSmall, 42, "Network", uiDimText());
   drawFontCentredGlowColour(FontSmall, 61,
                             wifiTransferUiSsid[0]
                               ? wifiTransferUiSsid : "Starting access point",
-                            C_WHITE);
-  drawFontCentredGlowColour(FontSmall, 82, "Password", C_DIM);
+                            uiMainText());
+  drawFontCentredGlowColour(FontSmall, 82, "Password", uiDimText());
   drawFontCentredGlowColour(FontSmall, 101,
                             wifiTransferUiPassword[0]
                               ? wifiTransferUiPassword : "Preparing...",
-                            C_WHITE);
+                            uiMainText());
   String openLine = String("Open: ") +
       (wifiTransferUiIp[0] ? wifiTransferUiIp : "192.168.4.1");
-  drawFontCentredGlowColour(FontSmall, 124, openLine, C_WHITE);
-  drawFontCentredGlowColour(FontSmall, 146, "BLE remote inactive", C_DIM);
+  drawFontCentredGlowColour(FontSmall, 124, openLine, uiMainText());
+  drawFontCentredGlowColour(FontSmall, 146, "BLE remote inactive", uiDimText());
   drawFontCentredGlowColour(FontSmall, 166, "Do not remove power", C_BLUE);
   String status = cleanDisplayText(String(wifiTransferUiStatus), 80);
   status = ellipsizeFontText(FontSmall, status, UI_W - 18);
-  drawFontCentredGlowColour(FontSmall, 184, status, C_WHITE);
+  drawFontCentredGlowColour(FontSmall, 184, status, uiMainText());
   String progress = cleanDisplayText(String(wifiTransferUiProgress), 80);
   progress = ellipsizeFontText(FontSmall, progress, UI_W - 18);
   if (progress.length()) {
-    drawFontCentredGlowColour(FontSmall, 203, progress, C_WHITE);
+    drawFontCentredGlowColour(FontSmall, 203, progress, uiMainText());
   }
   drawFontCentredGlowColour(FontSmall, 221,
-                            "Finish safely in browser", C_DIM);
+                            "Finish safely in browser", uiDimText());
 
   // Never wait indefinitely for the shared LCD/SD SPI bus while the transfer
   // lifecycle is changing SD ownership.  Render to the canvas immediately,
@@ -11448,13 +12441,13 @@ void drawWifiTransferError()
   uiView = VIEW_WIFI_TRANSFER_ERROR;
   drawBase();
   drawFontCentredGlow(FontMedium, 8, "WI-FI TRANSFER");
-  drawTaperLine(UI_W / 2, 44, 238, 1, C_CYAN_DARK);
-  drawFontCentredGlowColour(FontMedium, 62, "Transfer unavailable", C_RED);
+  drawTaperLine(UI_W / 2, 44, 238, 1, uiAccentDark());
+  drawFontCentredGlowColour(FontMedium, 62, "Transfer unavailable", uiFault());
   String error = cleanDisplayText(String(wifiTransferUiError), 80);
   error = ellipsizeFontText(FontSmall, error, UI_W - 24);
-  drawFontCentredGlowColour(FontSmall, 122, error, C_WHITE);
+  drawFontCentredGlowColour(FontSmall, 122, error, uiMainText());
   drawFontCentredGlowColour(FontSmall, 181,
-                            "Select or Back to return", C_DIM);
+                            "Select or Back to return", uiDimText());
   flushCanvasLocked();
 }
 
@@ -11466,13 +12459,13 @@ void drawWifiTransferPowerOffNotice()
   // normal transfer screen so it cannot be missed.
   uiView = VIEW_WIFI_TRANSFER_ACTIVE;
   drawBase();
-  drawFontCentredGlowColour(FontMedium, 18, "TRANSFER COMPLETE", C_WHITE);
-  drawFontCentredGlowColour(FontSmall, 72, "SD card is ready", C_WHITE);
-  drawFontCentredGlowColour(FontMedium, 108, "POWER OFF NOW", C_WHITE);
+  drawFontCentredGlowColour(FontMedium, 18, "TRANSFER COMPLETE", uiMainText());
+  drawFontCentredGlowColour(FontSmall, 72, "SD card is ready", uiMainText());
+  drawFontCentredGlowColour(FontMedium, 108, "POWER OFF NOW", uiMainText());
   drawFontCentredGlowColour(FontSmall, 158,
-                            "Leave power off for 10 seconds", C_WHITE);
+                            "Leave power off for 10 seconds", uiMainText());
   drawFontCentredGlowColour(FontSmall, 190,
-                            "to restore BLE remote", C_WHITE);
+                            "to restore BLE remote", uiMainText());
   flushCanvasLocked();
 }
 
@@ -11523,9 +12516,9 @@ void drawHome()
   uiView = VIEW_HOME;
   drawBase();
   drawTopStatus();
-  drawTaperLine((UI_W / 2) - 2, 72, 246, 2, C_CYAN_DARK);
+  drawTaperLine((UI_W / 2) - 2, 72, 246, 2, uiAccentDark());
   drawVolumeNumber(72);
-  drawTaperLine((UI_W / 2) - 2, 166, 246, 2, C_CYAN_DARK);
+  drawTaperLine((UI_W / 2) - 2, 166, 246, 2, uiAccentDark());
   drawAudioMeta(181);
   drawLevelBars();
 
@@ -11533,13 +12526,21 @@ void drawHome()
     // Keep the confirmation in the clear strip above the home meters.
     // Native anti-aliased text matches the rest of the accepted UI.
     canvas->fillRect(36, 191, 248, 20, C_BLACK);
-    drawFontCentred(FontSmall, 191, toastText, C_CYAN_SOFT);
+    drawFontCentred(FontSmall, 191, toastText, uiAccentSoft());
   }
   flushCanvasLocked();
 }
 
 void transitionToHome()
 {
+  // Album art is nonessential on Home. If its worker has already been
+  // admitted, invalidate the job so its next ring-aware I/O boundary stops
+  // consuming shared SD/PSRAM bandwidth behind an otherwise idle Home view.
+  if (uiView == VIEW_MEDIA_NOW_PLAYING &&
+      (mediaArtworkJobSubmitted ||
+       __atomic_load_n(&mediaArtworkWorkerBusy, __ATOMIC_ACQUIRE))) {
+    cancelMediaArtworkRequest(false);
+  }
   fadeUiOut();
   drawHome();
   fadeUiIn();
@@ -11592,7 +12593,7 @@ void drawMediaBrowserRow(uint8_t itemIndex, uint8_t visibleRow,
   const int16_t rowH = 31;
   canvas->fillRect(4, rowY, UI_W - 9, rowH, C_BLACK);
   if (selected) {
-    canvas->fillRect(4, rowY, 3, rowH, C_WHITE);
+    canvas->fillRect(4, rowY, 3, rowH, uiMainText());
   }
 
   String title = mediaBrowserItemName(itemIndex);
@@ -11603,25 +12604,25 @@ void drawMediaBrowserRow(uint8_t itemIndex, uint8_t visibleRow,
   int16_t textX = 34;
   int16_t textWidth = std::max<int16_t>(62, tagX - textX - 10);
 
-  drawMediaBrowserIcon(itemIndex, 10, rowY + 7, C_WHITE);
+  drawMediaBrowserIcon(itemIndex, 10, rowY + 7, uiMainText());
 
   int16_t titleWidth = fontTextWidth(FontMedium, title);
   if (selected && titleWidth > textWidth) {
     drawFontTextClipped(FontMedium, textX - mediaMarqueeOffset, rowY + 2,
-                        title, C_WHITE, textX, rowY, textWidth, rowH);
+                        title, uiMainText(), textX, rowY, textWidth, rowH);
   } else {
     String shown = selected ? title :
                    ellipsizeFontText(FontMedium, title, textWidth);
-    drawFontTextClipped(FontMedium, textX, rowY + 2, shown, C_WHITE,
+    drawFontTextClipped(FontMedium, textX, rowY + 2, shown, uiMainText(),
                         textX, rowY, textWidth, rowH);
   }
 
   if (tag.length()) {
-    drawFontText(FontSmall, tagX, rowY + 6, tag, C_WHITE);
+    drawFontText(FontSmall, tagX, rowY + 6, tag, uiMainText());
   }
 }
 
-void drawMediaBrowser()
+void renderMediaBrowser(bool fullFrame)
 {
   uiView = VIEW_MENU;
   drawBase();
@@ -11639,9 +12640,9 @@ void drawMediaBrowser()
   String breadcrumb = mediaFolderTitle(mediaBrowserPath);
   int16_t breadcrumbWidth = std::max<int16_t>(80, UI_W - rangeWidth - 28);
   breadcrumb = ellipsizeFontText(FontSmall, breadcrumb, breadcrumbWidth);
-  drawFontText(FontSmall, 8, 36, breadcrumb, C_WHITE);
-  drawFontRight(FontSmall, UI_W - 5, 36, rangeText, C_WHITE);
-  drawTaperLine(UI_W / 2, 55, 286, 1, C_CYAN_DARK);
+  drawFontText(FontSmall, 8, 36, breadcrumb, uiMainText());
+  drawFontRight(FontSmall, UI_W - 5, 36, rangeText, uiMainText());
+  drawTaperLine(UI_W / 2, 55, 286, 1, uiAccentDark());
 
   uint8_t count = mediaBrowserItemCount();
   menuIndex = std::min<uint8_t>(menuIndex, count - 1);
@@ -11686,29 +12687,85 @@ void drawMediaBrowser()
         ? mediaBrowserTotalEntries - 1 : 1;
     int16_t thumbY = trackY + (int16_t)(
         (uint64_t)travel * globalIndex / maximumGlobal);
-    canvas->fillRect(315, thumbY, 4, thumbH, C_CYAN_DARK);
+    canvas->fillRect(315, thumbY, 4, thumbH, uiAccentDark());
   }
 
   if (toastText.length() && (long)(toastUntil - millis()) > 0) {
     canvas->fillRect(28, 217, UI_W - 56, 21, C_BLACK);
     drawFontCentred(FontSmall, 218, toastText,
-                    toastText.startsWith("Unsupported:") ? C_RED : C_WHITE);
+                    toastText.startsWith("Unsupported:") ? uiFault() : uiMainText());
   }
-  flushCanvasLocked();
+  if (fullFrame) {
+    flushCanvasLocked();
+  } else {
+    // Held navigation changes only the five browser rows and scrollbar.  The
+    // header, breadcrumb and footer stay on the LCD, avoiding a 320x240 bus
+    // transfer for every accelerated repeat while the decoder reads the same
+    // shared SPI bus.
+    flushCanvasRegionLocked(4, 59, UI_W - 4, MEDIA_UI_VISIBLE_ROWS * 32);
+  }
+  mediaBrowserLastRedrawAt = millis();
+}
+
+void drawMediaBrowser()
+{
+  mediaBrowserRedrawPending = false;
+  mediaBrowserFullRedrawPending = false;
+  renderMediaBrowser(true);
+}
+
+bool mediaBrowserRedrawSafeForPlayback()
+{
+  MediaPlaybackState playback = mediaPlayerPoc.playbackState();
+  if (playback == MediaPlaybackState::Paused ||
+      playback == MediaPlaybackState::Stopped ||
+      playback == MediaPlaybackState::Finished ||
+      playback == MediaPlaybackState::Error) return true;
+  if (playback != MediaPlaybackState::Playing &&
+      playback != MediaPlaybackState::Draining) return false;
+
+  const size_t capacity = mediaPlayerPoc.ringCapacityFrames();
+  if (!capacity) return false;
+  return mediaPlayerPoc.bufferedFrames() * 100ULL >=
+         capacity * MEDIA_BROWSER_MIN_RING_PERCENT;
+}
+
+void serviceMediaBrowserRedraw()
+{
+  if (!mediaBrowserRedrawPending || uiView != VIEW_MENU ||
+      menuPage != PAGE_MEDIA || editActive) return;
+
+  const bool playbackActive = mediaPlayerPoc.active();
+  if (playbackActive &&
+      (!mediaBrowserRedrawSafeForPlayback() ||
+       (uint32_t)(millis() - mediaBrowserLastRedrawAt) <
+           MEDIA_BROWSER_REDRAW_MS)) return;
+
+  const bool fullFrame = mediaBrowserFullRedrawPending;
+  mediaBrowserRedrawPending = false;
+  mediaBrowserFullRedrawPending = false;
+  renderMediaBrowser(fullFrame);
+}
+
+void requestMediaBrowserNavigationRedraw(bool fullFrame)
+{
+  mediaBrowserRedrawPending = true;
+  mediaBrowserFullRedrawPending |= fullFrame;
+  serviceMediaBrowserRedraw();
 }
 
 void drawFallbackArtwork(int16_t x, int16_t y, int16_t edge)
 {
-  canvas->fillRect(x, y, edge, edge, blend565(C_BLACK, C_BLUE, 20));
-  canvas->drawRect(x, y, edge, edge, C_CYAN_DARK);
+  canvas->fillRect(x, y, edge, edge, blend565(C_BLACK, uiAccentInfo(), 20));
+  canvas->drawRect(x, y, edge, edge, uiAccentDark());
   int16_t cx = x + edge / 2;
   int16_t cy = y + edge / 2;
-  canvas->drawCircle(cx, cy, edge / 3, C_CYAN_DARK);
-  canvas->drawCircle(cx, cy, edge / 3 - 1, C_CYAN_DARK);
-  canvas->fillCircle(cx, cy, 6, C_CYAN);
-  canvas->drawFastVLine(cx + 17, cy - 29, 37, C_WHITE);
-  canvas->drawFastHLine(cx + 17, cy - 29, 19, C_WHITE);
-  canvas->fillCircle(cx + 11, cy + 10, 6, C_WHITE);
+  canvas->drawCircle(cx, cy, edge / 3, uiAccentDark());
+  canvas->drawCircle(cx, cy, edge / 3 - 1, uiAccentDark());
+  canvas->fillCircle(cx, cy, 6, uiAccent());
+  canvas->drawFastVLine(cx + 17, cy - 29, 37, uiMainText());
+  canvas->drawFastHLine(cx + 17, cy - 29, 19, uiMainText());
+  canvas->fillCircle(cx + 11, cy + 10, 6, uiMainText());
 }
 
 void drawMediaArtwork(int16_t x, int16_t y, int16_t edge)
@@ -11729,7 +12786,7 @@ void drawMediaArtwork(int16_t x, int16_t y, int16_t edge)
           mediaArtworkPixels[(uint32_t)sy * mediaArtworkWidth + sx]);
     }
   }
-  canvas->drawRect(x, y, edge, edge, C_CYAN_DARK);
+  canvas->drawRect(x, y, edge, edge, uiAccentDark());
 }
 
 void drawMediaArtworkRegion()
@@ -11773,7 +12830,7 @@ void drawWrappedMediaTitle(const String &source, int16_t x, int16_t y,
         remaining = "";
       }
     }
-    drawFontText(FontMedium, x, y + line * 30, accepted, C_WHITE);
+    drawFontText(FontMedium, x, y + line * 30, accepted, uiMainText());
   }
 }
 
@@ -11782,7 +12839,7 @@ void drawMediaNowPlaying()
   uiView = VIEW_MEDIA_NOW_PLAYING;
   drawBase();
   drawFontCentredGlow(FontMedium, 2, "Now Playing");
-  drawTaperLine(UI_W / 2, 39, 286, 1, C_CYAN_DARK);
+  drawTaperLine(UI_W / 2, 39, 286, 1, uiAccentDark());
 
   drawMediaArtwork(10, 48, MEDIA_ARTWORK_EDGE);
 
@@ -11802,7 +12859,7 @@ void drawMediaNowPlaying()
 
   String album = mediaFolderTitle(mediaQueueDirectory);
   album = ellipsizeFontText(FontSmall, album, 173);
-  drawFontText(FontSmall, 137, 111, album, C_DIM);
+  drawFontText(FontSmall, 137, 111, album, uiMainText());
 
   String formatRate = rejectedVisible
       ? (mediaLastRejectedReason[0] ? String(mediaLastRejectedReason)
@@ -11813,29 +12870,29 @@ void drawMediaNowPlaying()
             "  " + sampleRateTextFor(info.sampleRate));
   formatRate = ellipsizeFontText(FontSmall, formatRate, 173);
   drawFontText(FontSmall, 137, 137, formatRate,
-               rejectedVisible ? C_RED : C_CYAN);
+               rejectedVisible ? uiFault() : uiAccent());
   MediaPlaybackState state = mediaPlayerPoc.playbackState();
   if (rejectedVisible) {
     String rejectedText = "File was not played";
     int16_t rejectedX = 137 + std::max<int16_t>(
         0, (173 - fontTextWidth(FontSmall, rejectedText)) / 2);
-    drawFontText(FontSmall, rejectedX, 158, rejectedText, C_WHITE);
+    drawFontText(FontSmall, rejectedX, 158, rejectedText, uiMainText());
   } else if (transitioning) {
     String transitionText = "Preparing audio...";
     int16_t transitionX = 137 + std::max<int16_t>(
         0, (173 - fontTextWidth(FontSmall, transitionText)) / 2);
-    drawFontText(FontSmall, transitionX, 158, transitionText, C_WHITE);
+    drawFontText(FontSmall, transitionX, 158, transitionText, uiMainText());
   } else if (state == MediaPlaybackState::Seeking || mediaSeekUiPending) {
     String seekText = "Seeking...";
     int16_t seekX = 137 + std::max<int16_t>(
         0, (173 - fontTextWidth(FontSmall, seekText)) / 2);
-    drawFontText(FontSmall, seekX, 158, seekText, C_CYAN);
+    drawFontText(FontSmall, seekX, 158, seekText, uiAccent());
   } else if (mediaSeekPreviewVisible) {
     String seekText = String(mediaSeekPreviewDirection < 0 ? "REW  " : "FWD  ") +
                       String(mediaSeekPreviewSeconds) + " s";
     int16_t seekX = 137 + std::max<int16_t>(
         0, (173 - fontTextWidth(FontSmall, seekText)) / 2);
-    drawFontText(FontSmall, seekX, 158, seekText, C_WHITE);
+    drawFontText(FontSmall, seekX, 158, seekText, uiMainText());
   }
 
   MediaPlaybackStats stats = mediaPlayerPoc.playbackStats();
@@ -11843,25 +12900,25 @@ void drawMediaNowPlaying()
   if (info.totalFrames > 0) {
     uint64_t played = std::min<uint64_t>(stats.outputFrames, info.totalFrames);
     int16_t progress = (int16_t)((played * (UI_W - 20)) / info.totalFrames);
-    canvas->drawFastHLine(10, 180, progress, C_CYAN);
+    canvas->drawFastHLine(10, 180, progress, uiAccent());
   }
   mediaNowPlayingLastProgressAt = millis();
 
   // Previous
-  canvas->drawFastVLine(58, 198, 18, C_WHITE);
-  canvas->fillTriangle(60, 207, 75, 197, 75, 217, C_WHITE);
+  canvas->drawFastVLine(58, 198, 18, uiMainText());
+  canvas->fillTriangle(60, 207, 75, 197, 75, 217, uiMainText());
   // Play / pause
-  canvas->drawCircle(160, 207, 20, C_CYAN);
+  canvas->drawCircle(160, 207, 20, uiAccent());
   if (transitioning || !mediaPlayerPoc.active() ||
       state == MediaPlaybackState::Paused) {
-    canvas->fillTriangle(155, 198, 155, 216, 169, 207, C_WHITE);
+    canvas->fillTriangle(155, 198, 155, 216, 169, 207, uiMainText());
   } else {
-    canvas->fillRect(153, 198, 5, 18, C_WHITE);
-    canvas->fillRect(163, 198, 5, 18, C_WHITE);
+    canvas->fillRect(153, 198, 5, 18, uiMainText());
+    canvas->fillRect(163, 198, 5, 18, uiMainText());
   }
   // Next
-  canvas->fillTriangle(245, 197, 245, 217, 260, 207, C_WHITE);
-  canvas->drawFastVLine(262, 198, 18, C_WHITE);
+  canvas->fillTriangle(245, 197, 245, 217, 260, 207, uiMainText());
+  canvas->drawFastVLine(262, 198, 18, uiMainText());
   flushCanvasLocked();
 }
 
@@ -11883,7 +12940,7 @@ void showMediaSeekPreview(int direction, uint16_t seconds)
                     String(seconds) + " s";
   int16_t seekX = 137 + std::max<int16_t>(
       0, (173 - fontTextWidth(FontSmall, seekText)) / 2);
-  drawFontText(FontSmall, seekX, 158, seekText, C_WHITE);
+  drawFontText(FontSmall, seekX, 158, seekText, uiMainText());
   flushCanvasRegionLocked(137, 157, 173, 21);
 }
 
@@ -11950,7 +13007,7 @@ void serviceMediaUiAnimations()
             std::min<uint64_t>(stats.outputFrames, info.totalFrames);
         int16_t progress = (int16_t)(
             (played * (UI_W - 20)) / info.totalFrames);
-        canvas->drawFastHLine(10, 180, progress, C_CYAN);
+        canvas->drawFastHLine(10, 180, progress, uiAccent());
       }
       mediaNowPlayingLastProgressAt = now;
       flushCanvasRegionLocked(10, 179, UI_W - 20, 3);
@@ -12004,56 +13061,166 @@ void serviceMediaUiAnimations()
   flushCanvasRegionLocked(4, 59 + visibleRow * 32, UI_W - 5, 31);
 }
 
+void drawPresetList()
+{
+  static constexpr uint8_t VISIBLE_ROWS = 4;
+  static constexpr int16_t ROW_Y = 48;
+  static constexpr int16_t ROW_HEIGHT = 34;
+
+  uiView = VIEW_MENU;
+  drawBase();
+  drawFontCentredGlow(FontMedium, 2, "Presets");
+  drawTaperLine(UI_W / 2, 42, 286, 1, uiAccentDark());
+
+  menuIndex = std::min<uint8_t>(menuIndex, 9);
+  if (menuIndex < presetListTopRow) presetListTopRow = menuIndex;
+  if (menuIndex >= presetListTopRow + VISIBLE_ROWS) {
+    presetListTopRow = menuIndex - VISIBLE_ROWS + 1;
+  }
+  presetListTopRow = std::min<uint8_t>(presetListTopRow, 10 - VISIBLE_ROWS);
+
+  for (uint8_t row = 0; row < VISIBLE_ROWS; row++) {
+    const uint8_t slot = presetListTopRow + row;
+    const int16_t y = ROW_Y + row * ROW_HEIGHT;
+    const bool selected = slot == menuIndex;
+    canvas->fillRect(4, y, UI_W - 8, ROW_HEIGHT - 1, C_BLACK);
+    if (selected) canvas->fillRect(4, y, 3, ROW_HEIGHT - 1, uiMainText());
+
+    String label = ellipsizeFontText(FontMedium, presetListLabel(slot), UI_W - 35);
+    const uint16_t colour = isPresetOccupied(slot) ? uiMainText() : uiDimText();
+    drawFontText(FontMedium, 13, y + 3, label, colour);
+    if (slot == dspi.activePreset) {
+      canvas->fillCircle(UI_W - 10, y + 16, 3, uiAccent());
+    }
+  }
+
+  if (toastText.length() && (long)(toastUntil - millis()) > 0) {
+    drawFontCentredGlowColour(FontSmall, 197, toastText, uiAccent());
+  } else {
+    drawFontCentredGlowColour(FontSmall, 188,
+                              "Hold OK button to save", uiAccent());
+    drawFontCentredGlowColour(FontSmall, 211,
+                              "current preset", uiAccent());
+  }
+  flushCanvasLocked();
+}
+
+bool isSystemSettingsListPage(MenuPage page)
+{
+  return page == PAGE_SYSTEM || page == PAGE_SCREEN_SETTINGS ||
+         page == PAGE_IDLE_SCREEN || page == PAGE_THEME;
+}
+
+uint8_t themePaletteIndexForRow(uint8_t row)
+{
+  if (row == 0) return mainTextPaletteIndex;
+  if (row == 1) return accentPaletteIndex;
+  return volumeMeterPaletteIndex;
+}
+
+void drawSystemSettingsList()
+{
+  static constexpr int16_t ROW_Y = 52;
+  static constexpr int16_t ROW_HEIGHT = 36;
+
+  uiView = VIEW_MENU;
+  drawBase();
+  drawFontCentredGlow(FontMedium, 2, pageTitle(menuPage));
+  drawTaperLine(UI_W / 2, 44, 286, 1, uiAccentDark());
+
+  const uint8_t count = menuItemCount(menuPage);
+  menuIndex = count ? std::min<uint8_t>(menuIndex, count - 1) : 0;
+  for (uint8_t row = 0; row < count; row++) {
+    const int16_t y = ROW_Y + row * ROW_HEIGHT;
+    const bool selected = row == menuIndex;
+    canvas->fillRect(4, y, UI_W - 8, ROW_HEIGHT - 1, C_BLACK);
+    if (selected) canvas->fillRect(4, y, 3, ROW_HEIGHT - 1, uiMainText());
+
+    String value = menuItemValue(menuPage, row);
+    const bool paletteSwatch = menuPage == PAGE_THEME && row < 3;
+    const int16_t valueWidth = paletteSwatch ? 28 : (value.length()
+        ? std::min<int16_t>(105, fontTextWidth(FontSmall, value)) : 0);
+    const int16_t labelWidth = UI_W - 30 - valueWidth;
+    String label = ellipsizeFontText(
+        FontMedium, menuItemName(menuPage, row), labelWidth);
+    drawFontText(FontMedium, 13, y + 4, label, uiMainText());
+    if (value.length()) {
+      value = ellipsizeFontText(FontSmall, value, 105);
+      drawFontRight(FontSmall, UI_W - 13, y + 8, value, uiAccent());
+    }
+    if (paletteSwatch) {
+      const uint16_t swatch = themePaletteColour(themePaletteIndexForRow(row));
+      canvas->fillCircle(UI_W - 17, y + 17, 9, swatch);
+      canvas->drawCircle(UI_W - 17, y + 17, 10, uiDimText());
+    }
+
+    if (menuPage == PAGE_IDLE_SCREEN && row < 4 &&
+        row == (uint8_t)screenTimeoutAction) {
+      canvas->fillCircle(UI_W - 10, y + 17, 3, uiAccent());
+    }
+  }
+
+  if (toastText.length() && (long)(toastUntil - millis()) > 0) {
+    canvas->fillRect(12, 213, UI_W - 24, 24, C_BLACK);
+    drawFontCentredGlowColour(FontSmall, 214, toastText, uiAccent());
+  }
+  flushCanvasLocked();
+}
+
 void drawMenu()
 {
   if (menuPage == PAGE_MEDIA && !editActive) {
     drawMediaBrowser();
     return;
   }
+  if (menuPage == PAGE_PRESET && !editActive) {
+    drawPresetList();
+    return;
+  }
+  if (isSystemSettingsListPage(menuPage) && !editActive) {
+    drawSystemSettingsList();
+    return;
+  }
+  mediaBrowserRedrawPending = false;
+  mediaBrowserFullRedrawPending = false;
 
   uiView = editActive ? VIEW_EDIT : VIEW_MENU;
   drawBase();
 
   // Menu and every submenu use the same clean page-heading size.
   drawFontCentredGlow(FontMedium, 8, pageTitle(menuPage));
-  drawTaperLine(UI_W / 2, 44, 210, 1, C_CYAN_DARK);
+  drawTaperLine(UI_W / 2, 44, 210, 1, uiAccentDark());
 
   if (menuPage == PAGE_MAIN) {
     // Top-level categories are a horizontal carousel. The selected category
     // retains the accepted native 62 px font; adjacent categories provide a
     // restrained visual cue that Left/Right or encoder rotation move across.
     String selected = menuItemName(menuPage, menuIndex);
-    drawMenuTextNative(80, selected, C_WHITE);
+    drawMenuTextNative(80, selected, uiMainText());
     uint8_t count = menuItemCount(PAGE_MAIN);
     uint8_t previous = (uint8_t)((menuIndex + count - 1) % count);
     uint8_t next = (uint8_t)((menuIndex + 1) % count);
-    drawFontText(FontSmall, 18, 174, menuItemName(PAGE_MAIN, previous), C_DIM);
-    drawFontRight(FontSmall, 302, 174, menuItemName(PAGE_MAIN, next), C_DIM);
+    drawFontText(FontSmall, 18, 174, menuItemName(PAGE_MAIN, previous), uiDimText());
+    drawFontRight(FontSmall, 302, 174, menuItemName(PAGE_MAIN, next), uiDimText());
   } else {
     drawMenuOptionCentredGlow(53, menuItemName(menuPage, menuIndex));
 
     if (menuPage == PAGE_SYSTEM && menuIndex == 0) {
       String summary = dspi.connected ? "DSPi ready" : "Communication fault";
-      uint16_t colour = dspi.connected ? C_CYAN : C_RED;
+      uint16_t colour = dspi.connected ? uiAccent() : uiFault();
       drawFontCentredGlowColour(FontMedium, 112, summary, colour);
     } else if (menuPage == PAGE_BLUETOOTH &&
                bleMenuActionForIndex(menuIndex) == BLE_MENU_DEVICE) {
       String name = bleProfileValid ? String(bleSavedName) : "None";
-      uint16_t colour = bleConnected ? C_CYAN : (bleProfileValid ? C_WHITE : C_DIM);
+      uint16_t colour = bleConnected ? uiAccent() :
+          (bleProfileValid ? uiMainText() : uiDimText());
       int16_t width = fontTextWidth(FontLarge, name);
       if (width <= UI_W - 24) drawFontCentredGlowColour(FontLarge, 88, name, colour);
       else drawFontCentredGlowColour(FontMedium, 115, name, colour);
-    } else if (menuPage == PAGE_PRESET && menuIndex == 0 && firstOccupiedPreset() < 0) {
-      drawFontCentredGlowColour(FontMedium, 112, "No presets", C_DIM);
-    } else if (menuPage == PAGE_PRESET) {
-      drawPresetMenuValue();
-      if (menuIndex == 1) {
-        drawFontCentredGlowColour(FontSmall, 190, "Press to save", C_CYAN_SOFT);
-      }
     } else {
       drawMenuValue(88, menuItemValue(menuPage, menuIndex));
       if (menuPage == PAGE_SYSTEM && menuIndex == 2) {
-        drawFontCentredGlowColour(FontSmall, 190, "Global ceiling", C_CYAN_SOFT);
+        drawFontCentredGlowColour(FontSmall, 190, "Global ceiling", uiAccentSoft());
       }
     }
   }
@@ -12064,7 +13231,7 @@ void drawMenu()
   if (menuPage == PAGE_INPUT && toastText.length() &&
       (long)(toastUntil - millis()) > 0) {
     canvas->fillRect(20, 185, UI_W - 40, 23, C_BLACK);
-    drawFontCentred(FontSmall, 186, toastText, C_CYAN_SOFT);
+    drawFontCentred(FontSmall, 186, toastText, uiAccentSoft());
   }
   flushCanvasLocked();
 }
@@ -12074,10 +13241,10 @@ void drawStatusScreen()
   uiView = VIEW_STATUS;
   drawBase();
   drawFontCentredGlow(FontMedium, 8, "Status");
-  drawTaperLine(UI_W / 2, 44, 220, 1, C_CYAN_DARK);
+  drawTaperLine(UI_W / 2, 44, 220, 1, uiAccentDark());
 
   String primary = dspi.connected ? "DSPi ready" : "Communication fault";
-  uint16_t primaryColour = dspi.connected ? C_CYAN : C_RED;
+  uint16_t primaryColour = dspi.connected ? uiAccent() : uiFault();
 
   drawFontCentredGlowColour(FontMedium, 55, primary, primaryColour);
   String firmwareLine = "DSPi FW unavailable";
@@ -12092,17 +13259,17 @@ void drawStatusScreen()
     firmwareLine = pico + "  " + firmware;
   }
   drawFontCentredGlowColour(FontSmall, 96, firmwareLine,
-                            dspi.connected ? C_WHITE : C_DIM);
+                            dspi.connected ? uiMainText() : uiDimText());
   drawFontCentredGlowColour(FontSmall, 128,
                             dspi.connected ? "UART linked at 115200" : "UART offline",
-                            dspi.connected ? C_CYAN : C_RED);
+                            dspi.connected ? uiAccent() : uiFault());
   String remote = bleConnected ? "Remote connected" :
                   (bleProfileValid ? "Remote configured" : "No remote saved");
   drawFontCentredGlowColour(FontSmall, 158, remote,
-                            bleConnected ? C_CYAN : C_DIM);
+                            bleConnected ? uiAccent() : uiDimText());
   drawFontCentredGlow(FontSmall, 184, "Panel v1.2.0");
   if (mediaPlayerPoc.mounted()) {
-    drawFontCentredGlowColour(FontSmall, 210, "SD card mounted", C_CYAN);
+    drawFontCentredGlowColour(FontSmall, 210, "SD card mounted", uiAccent());
   }
 
   flushCanvasLocked();
@@ -12230,7 +13397,14 @@ void enterPage(MenuPage page)
     return;
   }
   if (page == PAGE_PRESET) {
-    editInt = isPresetOccupied(dspi.activePreset) ? dspi.activePreset : firstOccupiedPreset();
+    menuIndex = std::min<uint8_t>(dspi.activePreset, 9);
+    presetListTopRow = menuIndex > 1 ? menuIndex - 1 : 0;
+    presetListTopRow = std::min<uint8_t>(presetListTopRow, 6);
+    rememberedMenuIndex[PAGE_PRESET] = menuIndex;
+  }
+  if (page == PAGE_IDLE_SCREEN && previousPage != PAGE_IDLE_SCREEN) {
+    menuIndex = (uint8_t)screenTimeoutAction;
+    rememberedMenuIndex[PAGE_IDLE_SCREEN] = menuIndex;
   }
   drawMenu();
   fadeUiIn();
@@ -12239,7 +13413,7 @@ void enterPage(MenuPage page)
 void cancelActiveEdit()
 {
   if (!editActive) return;
-  if (menuPage == PAGE_SCREEN_SETTINGS && menuIndex == 2) {
+  if (menuPage == PAGE_SCREEN_SETTINGS && menuIndex == 0) {
     brightnessPercent = (uint8_t)editOriginalInt;
     applyBrightness();
   }
@@ -12291,6 +13465,10 @@ void goBack()
     drawMenu();
     return;
   }
+  if (menuPage == PAGE_THEME || menuPage == PAGE_IDLE_SCREEN) {
+    enterPage(PAGE_SCREEN_SETTINGS);
+    return;
+  }
   if (menuPage != PAGE_MAIN) {
     if (menuPage == PAGE_MEDIA && leaveMediaFolder()) {
       return;
@@ -12310,11 +13488,7 @@ void beginEdit()
   editActive = true;
   if (menuPage == PAGE_INPUT) {
     editInt = (int)displayedPhysicalInputSource();
-  } else if (menuPage == PAGE_PRESET) {
-    if (isPresetOccupied(dspi.activePreset)) editInt = dspi.activePreset;
-    else editInt = firstOccupiedPreset();
-  }
-  else if (menuPage == PAGE_LOUDNESS) {
+  } else if (menuPage == PAGE_LOUDNESS) {
     if (menuIndex == 0) editBool = dspi.loudnessEnabled;
     else if (menuIndex == 1) editFloat = dspi.loudnessReferenceSpl;
     else editFloat = dspi.loudnessIntensity;
@@ -12342,9 +13516,15 @@ void beginEdit()
   } else if (menuPage == PAGE_MEDIA_SETTINGS) {
     editInt = mediaSeekStepIndex;
   } else if (menuPage == PAGE_SCREEN_SETTINGS) {
-    if (menuIndex == 0) editInt = screenTimeoutOption;
-    else if (menuIndex == 1) editInt = screenDimPercent;
-    else editInt = brightnessPercent;
+    if (menuIndex == 0) editInt = brightnessPercent;
+    else editInt = screenTimeoutOption;
+  } else if (menuPage == PAGE_IDLE_SCREEN) {
+    editInt = screenDimPercent;
+  } else if (menuPage == PAGE_THEME) {
+    if (menuIndex == 0) editInt = mainTextPaletteIndex;
+    else if (menuIndex == 1) editInt = accentPaletteIndex;
+    else if (menuIndex == 2) editInt = volumeMeterPaletteIndex;
+    else editInt = analogVuColourChoice;
   }
   encoderMenuDetentRemainder = 0;
   editOriginalFloat = editFloat;
@@ -12384,8 +13564,7 @@ void adjustEdit(int direction)
   if (!editActive) return;
   if (menuPage == PAGE_INPUT) {
     editInt = (int)nextInputSourceChoice((InputSource)editInt, direction);
-  } else if (menuPage == PAGE_PRESET) editInt = nextAvailablePreset((uint8_t)editInt, direction);
-  else if (menuPage == PAGE_LOUDNESS) {
+  } else if (menuPage == PAGE_LOUDNESS) {
     if (menuIndex == 0) editBool = !editBool;
     else if (menuIndex == 1) editFloat = wrapEditFloat(editFloat, direction, 1.0f, 40.0f, 100.0f);
     else editFloat = wrapEditFloat(editFloat, direction, 5.0f, 0.0f, 200.0f);
@@ -12417,12 +13596,26 @@ void adjustEdit(int direction)
   } else if (menuPage == PAGE_MEDIA_SETTINGS) {
     editInt = (editInt + direction + 3) % 3;
   } else if (menuPage == PAGE_SCREEN_SETTINGS) {
-    if (menuIndex == 0) editInt = wrapEditInt(editInt, direction, 1, 0, 4);
-    else if (menuIndex == 1) editInt = wrapEditInt(editInt, direction, 10, 0, 80);
-    else {
+    if (menuIndex == 0) {
       editInt = wrapEditInt(editInt, direction, 10, 10, 100);
       brightnessPercent = editInt;
       applyBrightness();
+    } else if (menuIndex == 1) {
+      editInt = wrapEditInt(editInt, direction, 1, 0, 4);
+    }
+  } else if (menuPage == PAGE_IDLE_SCREEN) {
+    editInt = wrapEditInt(editInt, direction, 10, 10, 80);
+  } else if (menuPage == PAGE_THEME) {
+    if (menuIndex == 1) {
+      editInt = wrapEditInt(editInt, direction, 1,
+                            ACCENT_PALETTE_FIRST,
+                            THEME_PALETTE_COUNT - 1);
+    } else if (menuIndex < 3) {
+      editInt = wrapEditInt(editInt, direction, 1, 0,
+                            THEME_PALETTE_COUNT - 1);
+    } else {
+      editInt = wrapEditInt(editInt, direction, 1, 0,
+                            VU_COLOUR_CHOICE_COUNT - 1);
     }
   }
   drawMenu();
@@ -12440,12 +13633,15 @@ void applyEdit()
   }
 
   bool ok = true;
-  bool applyingPreset = menuPage == PAGE_PRESET;
   String successText = "Applied";
   String failureText = "DSPi error";
   if (menuPage == PAGE_INPUT) {
-    if (mediaPlayerPoc.active()) stopMediaPlayback("input menu");
     InputSource selectedSource = (InputSource)editInt;
+    // Merely selecting I2S never starts or interrupts music.  Selecting any
+    // other DSPi source owns the route and stops the ESP32 player first.
+    if (mediaPlayerPoc.active() && selectedSource != SRC_I2S) {
+      stopMediaPlayback("input menu");
+    }
     if (mediaRouteRestorePending && mediaRoute.captured &&
         selectedSource == mediaRoute.source) {
       // Applying the saved physical I2S source also means restoring its saved
@@ -12456,8 +13652,7 @@ void applyEdit()
            (dspi.connected && setInputSource(selectedSource, true));
       if (ok) discardPendingMediaRouteRestore("input menu");
     }
-  } else if (menuPage == PAGE_PRESET) ok = loadPreset((uint8_t)editInt);
-  else if (menuPage == PAGE_LOUDNESS) {
+  } else if (menuPage == PAGE_LOUDNESS) {
     if (menuIndex == 0) ok = setLoudness(editBool);
     else if (menuIndex == 1) ok = setLoudnessReference(editFloat);
     else ok = setLoudnessIntensity(editFloat);
@@ -12538,27 +13733,42 @@ void applyEdit()
     successText = "Applied";
   } else if (menuPage == PAGE_SCREEN_SETTINGS) {
     if (menuIndex == 0) {
-      screenTimeoutOption = (uint8_t)editInt;
-    } else if (menuIndex == 1) {
-      screenDimPercent = (uint8_t)editInt;
-    } else {
       brightnessPercent = (uint8_t)editInt;
       applyBrightness();
+    } else if (menuIndex == 1) {
+      screenTimeoutOption = (uint8_t)editInt;
     }
     markDeferredPreference(PREF_DIRTY_PANEL_SETTINGS);
     recordUserActivity();
     successText = "Applied";
+  } else if (menuPage == PAGE_IDLE_SCREEN) {
+    screenDimPercent = (uint8_t)editInt;
+    markDeferredPreference(PREF_DIRTY_PANEL_SETTINGS);
+    recordUserActivity();
+    successText = "Applied";
+  } else if (menuPage == PAGE_THEME) {
+    if (menuIndex == 0) {
+      mainTextPaletteIndex = (uint8_t)constrain(
+          editInt, 0, THEME_PALETTE_COUNT - 1);
+    } else if (menuIndex == 1) {
+      accentPaletteIndex = (uint8_t)constrain(
+          editInt, ACCENT_PALETTE_FIRST, THEME_PALETTE_COUNT - 1);
+    } else if (menuIndex == 2) {
+      volumeMeterPaletteIndex = (uint8_t)constrain(
+          editInt, 0, THEME_PALETTE_COUNT - 1);
+    } else {
+      analogVuColourChoice = (VuColourChoice)constrain(
+          editInt, 0, VU_COLOUR_CHOICE_COUNT - 1);
+      prepareAnalogVuFaceCache();
+    }
+    if (!persistThemePreferencesNow()) {
+      markDeferredPreference(PREF_DIRTY_PANEL_SETTINGS);
+    }
+    recordUserActivity();
+    successText = "Theme saved";
   }
 
   editActive = false;
-  if (applyingPreset && ok) {
-    // loadPreset() owns the verified completion overlay. Do not immediately
-    // erase it with the generic menu toast.
-    return;
-  }
-  if (applyingPreset && !ok) {
-    editInt = isPresetOccupied(dspi.activePreset) ? dspi.activePreset : firstOccupiedPreset();
-  }
   showToast(ok ? successText : failureText);
   drawMenu();
 }
@@ -12567,7 +13777,23 @@ void moveMenu(int direction)
 {
   if (direction == 0) return;
 
+  if (menuPage == PAGE_PRESET && !editActive) {
+    menuIndex = (uint8_t)constrain((int)menuIndex + direction, 0, 9);
+    rememberedMenuIndex[PAGE_PRESET] = menuIndex;
+    drawMenu();
+    return;
+  }
+
+  if (isSystemSettingsListPage(menuPage) && !editActive) {
+    const int count = menuItemCount(menuPage);
+    menuIndex = (uint8_t)constrain((int)menuIndex + direction, 0, count - 1);
+    rememberedMenuIndex[menuPage] = menuIndex;
+    drawMenu();
+    return;
+  }
+
   if (menuPage == PAGE_MEDIA && !editActive) {
+    const uint32_t previousPageFirst = mediaBrowserFirstEntryIndex;
     int step = direction > 0 ? 1 : -1;
     int remaining = abs(direction);
     while (remaining-- > 0) {
@@ -12575,6 +13801,11 @@ void moveMenu(int direction)
       if (step > 0) {
         if ((uint8_t)(menuIndex + 1) < count) {
           menuIndex++;
+        } else if (mediaPlayerPoc.active() &&
+                   !mediaBrowserRedrawSafeForPlayback()) {
+          // Do not begin a directory-page scan while the decoder is rebuilding
+          // its reserve.  The next held-button repeat retries this boundary.
+          break;
         } else if (!loadNextMediaBrowserPage()) {
           // Large media folders must stop at the final entry. Wrapping to the
           // beginning makes accelerated hold navigation frustrating and can
@@ -12585,6 +13816,9 @@ void moveMenu(int direction)
       } else {
         if (menuIndex > 0) {
           menuIndex--;
+        } else if (mediaPlayerPoc.active() &&
+                   !mediaBrowserRedrawSafeForPlayback()) {
+          break;
         } else if (!loadPreviousMediaBrowserPage()) {
           menuIndex = 0;
           break;
@@ -12592,7 +13826,8 @@ void moveMenu(int direction)
       }
     }
     rememberedMenuIndex[menuPage] = menuIndex;
-    drawMenu();
+    requestMediaBrowserNavigationRedraw(
+        mediaBrowserFirstEntryIndex != previousPageFirst);
     return;
   }
 
@@ -12624,6 +13859,26 @@ void selectMenuItem()
 
   if (menuPage == PAGE_SYSTEM && menuIndex == 1) {
     enterPage(PAGE_SCREEN_SETTINGS);
+    return;
+  }
+
+  if (menuPage == PAGE_SCREEN_SETTINGS) {
+    if (menuIndex == 2) {
+      enterPage(PAGE_IDLE_SCREEN);
+      return;
+    }
+    if (menuIndex == 3) {
+      enterPage(PAGE_THEME);
+      return;
+    }
+  }
+
+  if (menuPage == PAGE_IDLE_SCREEN && menuIndex < 4) {
+    screenTimeoutAction = (ScreenTimeoutAction)menuIndex;
+    markDeferredPreference(PREF_DIRTY_PANEL_SETTINGS);
+    recordUserActivity();
+    rememberedMenuIndex[PAGE_IDLE_SCREEN] = menuIndex;
+    drawMenu();
     return;
   }
 
@@ -12679,19 +13934,16 @@ void selectMenuItem()
     return;
   }
 
-  if (menuPage == PAGE_PRESET && menuIndex == 1) {
-    if (mediaPlayerPoc.active()) {
-      showToast("Stop Music before save");
+  if (menuPage == PAGE_PRESET) {
+    if (!isPresetOccupied(menuIndex)) {
+      showToast("Empty preset");
       drawMenu();
       return;
     }
-    beginPresetSaveConfirmation();
-    return;
-  }
-
-  if (menuPage == PAGE_PRESET && firstOccupiedPreset() < 0) {
-    showToast("No presets");
-    drawMenu();
+    if (!loadPreset(menuIndex, false)) {
+      showToast("Preset load failed");
+      drawMenu();
+    }
     return;
   }
 
@@ -12730,24 +13982,23 @@ void changePreset(int direction)
     redrawCurrentView();
     return;
   }
-  bool ok = dspi.connected && loadPreset(slot);
+  bool ok = dspi.connected && loadPreset(slot, true);
   if (!ok) showToast("DSPi ERROR");
   if (uiView != VIEW_CHANGE_OVERLAY) redrawCurrentView();
 }
 
 void changeInput(int direction)
 {
-  InputSource baseSource = mediaRoute.captured
-                             ? mediaRoute.source : dspi.source;
-  if (mediaPlayerPoc.active()) {
-    stopMediaPlayback("input change");
-  }
+  InputSource baseSource = dspi.source;
   if (!dspi.connected) {
     showToast("NO DSPi");
     redrawCurrentView();
     return;
   }
   InputSource target = nextInputSourceChoice(baseSource, direction);
+  if (mediaPlayerPoc.active() && target != SRC_I2S) {
+    stopMediaPlayback("input change");
+  }
   if (target == baseSource || !setInputSource(target, true)) {
     showToast(target == baseSource ? "Only one input" : "DSPi error");
     redrawCurrentView();
@@ -12853,10 +14104,10 @@ bool dispatchDedicatedMediaAction(UiAction action)
 
 void dispatchUiAction(UiAction action)
 {
+  if (action == ACT_NONE) return;
+  if (recordUserActivity()) return;
   action = contextualizeUiAction(action);
   if (action == ACT_NONE) return;
-
-  recordUserActivity();
 
   if (mediaVolumeOverlayVisible &&
       action != ACT_VOL_UP && action != ACT_VOL_DOWN) {
@@ -12902,11 +14153,11 @@ void dispatchUiAction(UiAction action)
   // Transfer screens deliberately freeze normal DSP/UI controls. Everywhere
   // else the dedicated keys remain User Volume controls.
   if (action == ACT_VOL_UP) {
-    changeVolume(0.5f);
+    changeVolume(1.0f);
     return;
   }
   if (action == ACT_VOL_DOWN) {
-    changeVolume(-0.5f);
+    changeVolume(-1.0f);
     return;
   }
 
@@ -12927,13 +14178,15 @@ void dispatchUiAction(UiAction action)
       if (!presetSaveConfirmYes) {
         enterPage(PAGE_PRESET);
       } else {
-        bool accepted = saveCurrentPreset();
+        bool accepted = saveCurrentPreset(presetSaveDestination);
         menuPage = PAGE_PRESET;
-        menuIndex = 1;
-        rememberedMenuIndex[PAGE_PRESET] = 1;
+        menuIndex = presetSaveDestination;
+        rememberedMenuIndex[PAGE_PRESET] = menuIndex;
         editActive = false;
         uiView = VIEW_MENU;
-        showToast(accepted ? "Saving..." : "DSPi error");
+        showToast(accepted ? (presetSavePanelSettingsOk
+                                  ? "Saving..." : "DSPi saved; panel error")
+                           : "DSPi error");
         drawMenu();
       }
     }
@@ -12968,9 +14221,9 @@ void dispatchUiAction(UiAction action)
         showToast("Playback stopped");
       }
     } else if (action == ACT_NAV_UP) {
-      changeVolume(0.5f);
+      changeVolume(1.0f);
     } else if (action == ACT_NAV_DOWN) {
-      changeVolume(-0.5f);
+      changeVolume(-1.0f);
     } else if (action == ACT_BACK) {
       goBack();
     } else if (action == ACT_HOME) {
@@ -13026,10 +14279,10 @@ void dispatchUiAction(UiAction action)
       break;
     }
     case ACT_NAV_UP:
-      if (uiView == VIEW_HOME) changeVolume(0.5f); // Serial/test fallback only.
+      if (uiView == VIEW_HOME) changeVolume(1.0f); // Serial/test fallback only.
       break;
     case ACT_NAV_DOWN:
-      if (uiView == VIEW_HOME) changeVolume(-0.5f); // Serial/test fallback only.
+      if (uiView == VIEW_HOME) changeVolume(-1.0f); // Serial/test fallback only.
       break;
     case ACT_SELECT:
       if (uiView == VIEW_VISUALIZER) transitionToHome();
@@ -13053,7 +14306,7 @@ void dispatchUiAction(UiAction action)
       bool fullScreen = uiView == VIEW_HOME;
       bool target = !dspi.loudnessEnabled;
       bool ok = dspi.connected && setLoudness(target);
-      if (ok && fullScreen) showFeatureConfirmation("Loudness", target);
+      if (ok && fullScreen) showFeatureStateNotification("Loudness", target);
       else {
         showToast(ok ? (String("Loudness ") + (target ? "On" : "Off"))
                      : (dspi.connected ? "DSPi error" : "NO DSPi"), 900);
@@ -13065,7 +14318,7 @@ void dispatchUiAction(UiAction action)
       bool fullScreen = uiView == VIEW_HOME;
       bool target = !dspi.crossfeedEnabled;
       bool ok = dspi.connected && setCrossfeed(target);
-      if (ok && fullScreen) showFeatureConfirmation("Crossfeed", target);
+      if (ok && fullScreen) showFeatureStateNotification("Crossfeed", target);
       else {
         showToast(ok ? (String("Crossfeed ") + (target ? "On" : "Off"))
                      : (dspi.connected ? "DSPi error" : "NO DSPi"), 900);
@@ -13077,7 +14330,7 @@ void dispatchUiAction(UiAction action)
       bool fullScreen = uiView == VIEW_HOME;
       bool target = !dspi.levellerEnabled;
       bool ok = dspi.connected && setLeveller(target);
-      if (ok && fullScreen) showFeatureConfirmation("Leveller", target);
+      if (ok && fullScreen) showFeatureStateNotification("Leveller", target);
       else {
         showToast(ok ? (String("Leveller ") + (target ? "On" : "Off"))
                      : (dspi.connected ? "DSPi error" : "NO DSPi"), 900);
@@ -13089,7 +14342,7 @@ void dispatchUiAction(UiAction action)
       bool fullScreen = uiView == VIEW_HOME;
       bool target = !dspi.psybassEnabled;
       bool ok = dspi.connected && psybassWritable() && setPsybassEnabled(target);
-      if (ok && fullScreen) showFeatureConfirmation("Psy Bass", target);
+      if (ok && fullScreen) showFeatureStateNotification("Psy Bass", target);
       else {
         String failure = dspi.connected && !psybassWritable() ? "Unavailable" :
                          (dspi.connected ? "DSPi error" : "NO DSPi");
@@ -13119,6 +14372,7 @@ bool buttonRaw = true;
 bool buttonStable = true;
 bool buttonLongSent = false;
 bool buttonVisualizerSent = false;
+bool buttonWakeConsumed = false;
 unsigned long buttonChangedAt = 0;
 unsigned long buttonPressedAt = 0;
 
@@ -13157,7 +14411,10 @@ void applyEncoderDetents(int16_t detents)
 {
   if (detents == 0) return;
 
-  recordUserActivity();
+  if (recordUserActivity()) {
+    encoderMenuDetentRemainder = 0;
+    return;
+  }
 
   if (uiView == VIEW_FEATURE_CONFIRM) dismissFeatureConfirmation();
   if (uiView == VIEW_CHANGE_OVERLAY) dismissChangeOverlay();
@@ -13181,7 +14438,7 @@ void applyEncoderDetents(int16_t detents)
 
   if (uiView == VIEW_HOME || uiView == VIEW_VISUALIZER ||
       uiView == VIEW_MEDIA_NOW_PLAYING) {
-    changeVolume((float)detents * 0.5f);
+    changeVolume((float)detents * 1.0f);
     return;
   }
   if (uiView == VIEW_MENU) {
@@ -13254,10 +14511,12 @@ void pollEncoder()
 
   buttonStable = raw;
   if (!buttonStable) {
-    recordUserActivity();
+    buttonWakeConsumed = recordUserActivity();
     buttonPressedAt = millis();
     buttonLongSent = false;
     buttonVisualizerSent = false;
+  } else if (buttonWakeConsumed) {
+    buttonWakeConsumed = false;
   } else if (!buttonLongSent && !buttonVisualizerSent) {
     unsigned long heldMs = millis() - buttonPressedAt;
     if (uiView == VIEW_VISUALIZER) {
@@ -13272,7 +14531,7 @@ void pollEncoder()
 
 void pollEncoderLongPress()
 {
-  if (buttonStable) return;
+  if (buttonStable || buttonWakeConsumed) return;
   unsigned long heldMs = millis() - buttonPressedAt;
 
   if (uiView == VIEW_HOME) {
@@ -13283,6 +14542,17 @@ void pollEncoderLongPress()
     }
     return;
   }
+
+  if (uiView == VIEW_MENU && menuPage == PAGE_PRESET && !editActive &&
+      !buttonLongSent && heldMs >= PRESET_SAVE_HOLD_MS) {
+    buttonLongSent = true;
+    beginHighlightedPresetSave();
+    return;
+  }
+
+  // Preset Select owns its five-second hold gesture. Do not let the generic
+  // 750 ms Back shortcut exit the list while the user is still holding it.
+  if (uiView == VIEW_MENU && menuPage == PAGE_PRESET && !editActive) return;
 
   if (uiView != VIEW_VISUALIZER && !buttonLongSent && heldMs >= ENCODER_LONG_PRESS_MS) {
     buttonLongSent = true;
@@ -13555,7 +14825,7 @@ void drawBleSpinner(int16_t cx, int16_t cy, uint8_t phase)
     else if (distance == 3) alpha = 105;
     else alpha = 45;
 
-    uint16_t colour = blend565(C_BLACK, C_CYAN, alpha);
+    uint16_t colour = blend565(C_BLACK, uiAccent(), alpha);
     uint8_t radius = distance < 2 ? 3 : 2;
     canvas->fillCircle(cx + points[i][0], cy + points[i][1], radius, colour);
   }
@@ -13581,7 +14851,7 @@ void drawBleScreen()
   uiView = VIEW_BLE;
   drawBase();
   drawFontCentredGlow(FontMedium, 8, "Remote");
-  drawTaperLine(UI_W / 2, 44, 220, 1, C_CYAN_DARK);
+  drawTaperLine(UI_W / 2, 44, 220, 1, uiAccentDark());
 
   if (bleUiMode == BLE_UI_SCANNING) {
     drawMenuOptionCentredGlow(53, "Searching");
@@ -13593,7 +14863,7 @@ void drawBleScreen()
     portEXIT_CRITICAL(&bleDataMux);
     drawMenuOptionCentredGlow(53, "Devices");
     if (!count) {
-      drawFontCentredGlowColour(FontMedium, 112, "None found", C_DIM);
+      drawFontCentredGlowColour(FontMedium, 112, "None found", uiDimText());
     } else {
       BleDeviceInfo device;
       portENTER_CRITICAL(&bleDataMux);
@@ -13602,44 +14872,47 @@ void drawBleScreen()
       String name = device.name[0] ? String(device.name) : "BLE remote";
       name = cleanDisplayText(name, 22);
       if (fontTextWidth(FontMedium, name) <= UI_W - 20) {
-        drawFontCentredGlowColour(FontMedium, 103, name, C_WHITE);
+        drawFontCentredGlowColour(FontMedium, 103, name, uiMainText());
       } else {
-        drawFontCentredGlowColour(FontSmall, 124, name, C_WHITE);
+        drawFontCentredGlowColour(FontSmall, 124, name, uiMainText());
       }
       String signal = String("Signal ") + String((int)device.rssi) + " dBm";
-      drawFontCentred(FontSmall, 169, signal, device.hidAdvertised ? C_CYAN : C_DIM);
+      drawFontCentred(FontSmall, 169, signal,
+                      device.hidAdvertised ? uiAccent() : uiDimText());
       drawMenuDots(count, bleResultIndex);
     }
   } else if (bleUiMode == BLE_UI_MAPPING) {
     drawMenuOptionCentredGlow(53, "Key Map");
     String actionName = bleMappingNames[bleMappingIndex];
     if (fontTextWidth(FontMedium, actionName) <= UI_W - 20) {
-      drawFontCentredGlowColour(FontMedium, 100, actionName, C_WHITE);
+      drawFontCentredGlowColour(FontMedium, 100, actionName, uiMainText());
     } else {
-      drawFontCentredGlowColour(FontSmall, 120, actionName, C_WHITE);
+      drawFontCentredGlowColour(FontSmall, 120, actionName, uiMainText());
     }
     String label = remoteLabelForAction(bleMappingIndex);
     drawFontCentredGlowColour(FontSmall, 166, label,
-                              remoteMapEntrySet(remoteMap[bleMappingIndex]) ? C_CYAN : C_DIM);
+                              remoteMapEntrySet(remoteMap[bleMappingIndex])
+                                  ? uiAccent() : uiDimText());
     drawFontCentred(FontSmall, 214,
                     String((int)bleMappingIndex + 1) + " / " +
-                    String(BLE_MAPPING_COUNT), C_DIM);
+                    String(BLE_MAPPING_COUNT), uiDimText());
   } else if (bleUiMode == BLE_UI_LEARNING) {
     drawMenuOptionCentredGlow(53, bleMappingNames[bleMappingIndex]);
     String prompt = bleLearningMessage.length() ? bleLearningMessage :
                     (bleLearningAwaitRelease ? "Release buttons" : "Press remote");
     const FontDef &promptFont = fontTextWidth(FontMedium, prompt) <= UI_W - 20 ? FontMedium : FontSmall;
     drawFontCentredGlowColour(promptFont, promptFont.lineHeight > 30 ? 112 : 126,
-                              prompt, C_CYAN);
+                              prompt, uiAccent());
   } else if (bleUiMode == BLE_UI_SHORTCUTS) {
     drawMenuOptionCentredGlow(53, "Home Screen D-pad shortcuts");
-    drawFontCentredGlowColour(FontMedium, 98, homeShortcutKeyNames[bleShortcutIndex], C_WHITE);
+    drawFontCentredGlowColour(FontMedium, 98,
+                              homeShortcutKeyNames[bleShortcutIndex], uiMainText());
     uint8_t option = homeShortcutOptionIndex(homeShortcuts[bleShortcutIndex]);
     String value = homeShortcutOptionNames[option];
     if (fontTextWidth(FontMedium, value) <= UI_W - 24) {
-      drawFontCentredGlowColour(FontMedium, 145, value, C_CYAN);
+      drawFontCentredGlowColour(FontMedium, 145, value, uiAccent());
     } else {
-      drawFontCentredGlowColour(FontSmall, 161, value, C_CYAN);
+      drawFontCentredGlowColour(FontSmall, 161, value, uiAccent());
     }
     drawMenuDots(HOME_SHORTCUT_COUNT, bleShortcutIndex);
   } else if (bleUiMode == BLE_UI_SHORTCUT_EDIT) {
@@ -13647,17 +14920,19 @@ void drawBleScreen()
     drawMenuOptionCentredGlow(53, heading);
     String value = homeShortcutOptionNames[bleShortcutOptionIndex];
     if (fontTextWidth(FontMedium, value) <= UI_W - 24) {
-      drawFontCentredGlowColour(FontMedium, 112, value, C_CYAN);
+      drawFontCentredGlowColour(FontMedium, 112, value, uiAccent());
     } else {
-      drawFontCentredGlowColour(FontSmall, 133, value, C_CYAN);
+      drawFontCentredGlowColour(FontSmall, 133, value, uiAccent());
     }
     drawMenuDots(HOME_SHORTCUT_OPTION_COUNT, bleShortcutOptionIndex);
   } else if (bleUiMode == BLE_UI_CONFIRM_DEFAULTS) {
     drawMenuOptionCentredGlow(53, "Restore Defaults");
-    drawFontCentredGlowColour(FontLarge, 88, bleDefaultsYes ? "Yes" : "No", C_CYAN);
+    drawFontCentredGlowColour(FontLarge, 88,
+                              bleDefaultsYes ? "Yes" : "No", uiAccent());
   } else if (bleUiMode == BLE_UI_CONFIRM_REMOVE) {
     drawMenuOptionCentredGlow(53, "Remove remote?");
-    drawFontCentredGlowColour(FontLarge, 88, bleRemoveYes ? "Yes" : "No", C_CYAN);
+    drawFontCentredGlowColour(FontLarge, 88,
+                              bleRemoveYes ? "Yes" : "No", uiAccent());
   } else if (bleUiMode == BLE_UI_MESSAGE && bleMessage == "Pairing") {
     // Pairing is shown only once. The animated spinner supplies the activity cue.
     drawMenuOptionCentredGlow(53, "Pairing");
@@ -13669,13 +14944,14 @@ void drawBleScreen()
              (bleMessage == "Connected" || bleMessage == "Reconnecting")) {
     String name = cleanDisplayText(String(bleSavedName), 22);
     const FontDef &nameFont = fontTextWidth(FontMedium, name) <= UI_W - 20 ? FontMedium : FontSmall;
-    drawFontCentredGlowColour(nameFont, nameFont.lineHeight > 30 ? 67 : 80, name, C_WHITE);
-    drawFontCentredGlowColour(FontMedium, 133, bleMessage, C_CYAN);
+    drawFontCentredGlowColour(nameFont, nameFont.lineHeight > 30 ? 67 : 80,
+                              name, uiMainText());
+    drawFontCentredGlowColour(FontMedium, 133, bleMessage, uiAccent());
   } else {
     drawMenuOptionCentredGlow(53, "Remote");
     drawFontCentredGlowColour(FontMedium, 112,
                               bleMessage.length() ? bleMessage : "Ready",
-                              C_CYAN);
+                              uiAccent());
   }
 
   flushCanvasLocked();
@@ -14839,6 +16115,8 @@ void clearBleHeldState()
   bleHeldFailsafeBlocked = false;
   bleHeldSeekGesture = false;
   bleHeldSeekCommitted = false;
+  bleHeldPresetSelectGesture = false;
+  bleHeldPresetSaveCommitted = false;
   clearMediaSeekPreview();
 }
 
@@ -14847,9 +16125,18 @@ void finishBleHeldButton(bool dispatchShortPress)
   UiAction action = bleHeldAction;
   bool seekGesture = bleHeldSeekGesture;
   bool commitSeek = bleHeldSeekCommitted;
+  bool presetSelectGesture = bleHeldPresetSelectGesture;
+  bool presetSaveCommitted = bleHeldPresetSaveCommitted;
   int direction = mediaSeekDirectionForAction(action);
   uint16_t seconds = mediaSeekPreviewSeconds;
   clearBleHeldState();
+
+  if (presetSelectGesture) {
+    if (!presetSaveCommitted && dispatchShortPress && action == ACT_SELECT) {
+      dispatchUiAction(action);
+    }
+    return;
+  }
 
   if (!seekGesture) return;
   if (!commitSeek) {
@@ -14896,7 +16183,17 @@ void serviceBleHeldButton()
     bleHeldCanRepeat = false;
     bleHeldSeekGesture = false;
     bleHeldSeekCommitted = false;
+    bleHeldPresetSelectGesture = false;
+    bleHeldPresetSaveCommitted = false;
     bleHeldFailsafeBlocked = true;
+    return;
+  }
+
+  if (bleHeldPresetSelectGesture) {
+    if (!bleHeldPresetSaveCommitted && heldFor >= PRESET_SAVE_HOLD_MS) {
+      bleHeldPresetSaveCommitted = true;
+      beginHighlightedPresetSave();
+    }
     return;
   }
 
@@ -14940,7 +16237,7 @@ void serviceBleHeldButton()
   if ((uint32_t)(now - bleHeldLastDispatchAt) < BLE_REPEAT_INTERVAL_MS) return;
 
   bleHeldLastDispatchAt = now;
-  float stepDb = 0.5f;
+  float stepDb = 1.0f;
   if (heldFor >= BLE_REPEAT_ACCEL_3_MS) stepDb = 4.0f;
   else if (heldFor >= BLE_REPEAT_ACCEL_2_MS) stepDb = 2.0f;
   else if (heldFor >= BLE_REPEAT_ACCEL_1_MS) stepDb = 1.0f;
@@ -14950,7 +16247,10 @@ void serviceBleHeldButton()
 void processBleReport(const BleReportPacket &packet)
 {
   if (reportIsRelease(packet)) {
-    if (bleButtonHeld && bleHeldSeekGesture) finishBleHeldButton(true);
+    if (bleButtonHeld &&
+        (bleHeldSeekGesture || bleHeldPresetSelectGesture)) {
+      finishBleHeldButton(true);
+    }
     else clearBleHeldState();
     if (bleUiMode == BLE_UI_LEARNING) {
       bleLearningAwaitRelease = false;
@@ -14982,7 +16282,10 @@ void processBleReport(const BleReportPacket &packet)
   // A different non-zero report ends the previous button before starting the
   // new one. This preserves a short previous/next tap on remotes that omit a
   // dedicated all-zero release notification.
-  if (bleButtonHeld && bleHeldSeekGesture) finishBleHeldButton(true);
+  if (bleButtonHeld &&
+      (bleHeldSeekGesture || bleHeldPresetSelectGesture)) {
+    finishBleHeldButton(true);
+  }
   else clearBleHeldState();
   bleButtonHeld = true;
   bleHeldSourceKey = packet.sourceKey;
@@ -14998,7 +16301,10 @@ void processBleReport(const BleReportPacket &packet)
   action = contextualizeUiAction(action);
   bleHeldAction = action;
   bleHeldSeekGesture = remoteActionStartsMediaSeek(action);
-  bleHeldCanRepeat = remoteActionCanRepeat(action) || bleHeldSeekGesture;
+  bleHeldPresetSelectGesture = action == ACT_SELECT &&
+      uiView == VIEW_MENU && menuPage == PAGE_PRESET && !editActive;
+  bleHeldCanRepeat = remoteActionCanRepeat(action) || bleHeldSeekGesture ||
+                     bleHeldPresetSelectGesture;
 
   MediaPlaybackState playback = mediaPlayerPoc.playbackState();
   const bool audioCritical = playback == MediaPlaybackState::Starting ||
@@ -15017,7 +16323,8 @@ void processBleReport(const BleReportPacket &packet)
     Serial.println();
   }
 
-  if (action != ACT_NONE && !bleHeldSeekGesture) dispatchUiAction(action);
+  if (action != ACT_NONE && !bleHeldSeekGesture &&
+      !bleHeldPresetSelectGesture) dispatchUiAction(action);
 }
 
 void sortBleResults()
@@ -15038,6 +16345,23 @@ void sortBleResults()
 
 void pollBleRemote()
 {
+  MediaPlaybackState playback = mediaPlayerPoc.playbackState();
+  const bool audioCritical = playback == MediaPlaybackState::Starting ||
+                             playback == MediaPlaybackState::Playing ||
+                             playback == MediaPlaybackState::Seeking ||
+                             playback == MediaPlaybackState::Draining;
+
+  // Automatic reconnect scans exercise ESP-IDF's high-priority Bluetooth
+  // work on CPU0. Abort only a background reconnect scan when playback becomes
+  // timing-critical. A connected remote continues working, and reconnection
+  // resumes on pause or stop; explicit user scans are not silently cancelled.
+  if (audioCritical && bleScanActive &&
+      bleScanPurpose == BLE_SCAN_RECONNECT) {
+    resetBleScanState(true);
+    lastBleScanAt = millis();
+    Serial.println("BLE RECONNECT: deferred during audio playback");
+  }
+
   if (bleTransferShutdownRequested) return;
   if (bleRemovalInProgress) {
     serviceBleRemoteRemoval();
@@ -15146,11 +16470,6 @@ void pollBleRemote()
     }
   }
 
-  MediaPlaybackState playback = mediaPlayerPoc.playbackState();
-  const bool audioCritical = playback == MediaPlaybackState::Starting ||
-                             playback == MediaPlaybackState::Playing ||
-                             playback == MediaPlaybackState::Seeking ||
-                             playback == MediaPlaybackState::Draining;
   const uint8_t reportBudget = mediaPlaybackBufferLow() ? 2 :
                                (audioCritical ? 4 : BLE_REPORTS_PER_LOOP);
   BleReportPacket packet;
@@ -15199,7 +16518,8 @@ void pollBleRemote()
     }
   }
 
-  if (bleProfileValid && !bleConnected && !bleScanActive && !bleRemovalInProgress &&
+  if (!audioCritical && bleProfileValid && !bleConnected &&
+      !bleScanActive && !bleRemovalInProgress &&
       !bleStackRestartPending && bleStackReady &&
       !bleConnectRequested && bleUiMode != BLE_UI_SCANNING &&
       millis() - lastBleScanAt >= BLE_RESCAN_INTERVAL_MS) {
@@ -15306,8 +16626,10 @@ void serviceDeferredPreferences()
     ok = preferences.putUChar("brightness", brightnessPercent) == 1 &&
          preferences.putUChar("screen_to", screenTimeoutOption) == 1 &&
          preferences.putUChar("screen_dim", screenDimPercent) == 1 &&
+         preferences.putUChar("screen_act", screenTimeoutAction) == 1 &&
          preferences.putUChar("media_seek", mediaSeekStepIndex) == 1 &&
-         preferences.putUChar("media_set_ver", MEDIA_SETTINGS_VERSION) == 1;
+         preferences.putUChar("media_set_ver", MEDIA_SETTINGS_VERSION) == 1 &&
+         persistThemePreferencesNow();
   }
 
   portENTER_CRITICAL(&deferredPreferenceMux);
@@ -16386,7 +17708,9 @@ void servicePresetSaveCompletion()
   presetSaveCompletionAttempts++;
   if (syncCurrentState(true)) {
     presetSaveCompletionPending = false;
-    showToast("Preset saved");
+    showToast(presetSavePanelSettingsOk
+        ? "Saved to P" + String((int)presetSaveCompletionSlot + 1)
+        : "DSPi saved; panel error");
     redrawCurrentView();
   } else if (presetSaveCompletionAttempts < 4) {
     presetSaveCompletionAt = millis() + 250;
@@ -16394,7 +17718,9 @@ void servicePresetSaveCompletion()
     // 0x90 was accepted, but the post-blackout verification link did not
     // recover in time. Do not incorrectly report a definite flash failure.
     presetSaveCompletionPending = false;
-    showToast("Save accepted");
+    showToast(presetSavePanelSettingsOk
+        ? "Save accepted P" + String((int)presetSaveCompletionSlot + 1)
+        : "DSPi saved; panel error");
     redrawCurrentView();
   }
 }
@@ -16469,7 +17795,7 @@ void drawBootLogo(uint8_t alpha)
 {
   canvas->fillScreen(C_BLACK);
   drawFontCentred(FontLarge, 68, "DSPi",
-                  blend565(C_BLACK, C_WHITE, alpha));
+                  blend565(C_BLACK, uiMainText(), alpha));
   flushCanvasLocked();
 }
 
@@ -16571,6 +17897,84 @@ void setup()
   beginEncoder();
 
   preferences.begin("dspi-panel", false);
+
+  // Version 3 adds two palette roles and separates digital/home meters from
+  // the analogue face. Every older VU choice is copied to both new roles so
+  // the first boot after upgrade is visually identical.
+  bool themeMigrated = false;
+  const size_t themeBlobBytes = preferences.getBytesLength("theme_cfg");
+  if (themeBlobBytes == sizeof(ThemeSettingsRecord)) {
+    ThemeSettingsRecord storedTheme = {};
+    preferences.getBytes("theme_cfg", &storedTheme, sizeof(storedTheme));
+    if (storedTheme.version == THEME_SETTINGS_VERSION &&
+        storedTheme.mainTextPalette < THEME_PALETTE_COUNT &&
+        storedTheme.accentPalette >= ACCENT_PALETTE_FIRST &&
+        storedTheme.accentPalette < THEME_PALETTE_COUNT &&
+        storedTheme.meterPalette < THEME_PALETTE_COUNT &&
+        storedTheme.analogVu < VU_COLOUR_CHOICE_COUNT) {
+      mainTextPaletteIndex = storedTheme.mainTextPalette;
+      accentPaletteIndex = storedTheme.accentPalette;
+      volumeMeterPaletteIndex = storedTheme.meterPalette;
+      analogVuColourChoice = (VuColourChoice)storedTheme.analogVu;
+    } else {
+      themeMigrated = true;
+    }
+  } else if (themeBlobBytes == sizeof(LegacyThemeSettingsRecordV2)) {
+    LegacyThemeSettingsRecordV2 legacy = {};
+    preferences.getBytes("theme_cfg", &legacy, sizeof(legacy));
+    if (legacy.version == 2 && legacy.mainText <= UI_COLOUR_YELLOW &&
+        legacy.accent <= ACCENT_COLOUR_YELLOW &&
+        legacy.vu < VU_COLOUR_CHOICE_COUNT) {
+      mainTextPaletteIndex = legacyMainTextToPalette(legacy.mainText);
+      accentPaletteIndex = legacyAccentToPalette(legacy.accent);
+      volumeMeterPaletteIndex = legacyVuToPalette(legacy.vu);
+      analogVuColourChoice = (VuColourChoice)legacy.vu;
+    }
+    themeMigrated = true;
+  } else {
+    const uint8_t storedThemeVersion = preferences.getUChar("theme_ver", 0);
+    if (storedThemeVersion == 2) {
+      const uint8_t storedMainText = preferences.getUChar(
+          "theme_text", UI_COLOUR_WHITE);
+      const uint8_t storedAccent = preferences.getUChar(
+          "theme_acc", ACCENT_COLOUR_CYAN);
+      const uint8_t storedVu = preferences.getUChar(
+          "theme_vu", VU_COLOUR_CYAN);
+      mainTextPaletteIndex = legacyMainTextToPalette(storedMainText);
+      accentPaletteIndex = legacyAccentToPalette(storedAccent);
+      volumeMeterPaletteIndex = legacyVuToPalette(storedVu);
+      analogVuColourChoice = storedVu < VU_COLOUR_CHOICE_COUNT
+          ? (VuColourChoice)storedVu : VU_COLOUR_CYAN;
+    } else if (storedThemeVersion == 1) {
+      const uint8_t oldMainText = preferences.getUChar(
+          "theme_text", UI_COLOUR_WHITE);
+      const uint8_t oldAccent = preferences.getUChar(
+          "theme_acc", UI_COLOUR_CYAN);
+      const uint8_t oldVu = preferences.getUChar("theme_vu", 0);
+      mainTextPaletteIndex = legacyMainTextToPalette(
+          oldMainText <= UI_COLOUR_MAGENTA ? oldMainText : UI_COLOUR_WHITE);
+      const uint8_t compactAccent = oldAccent >= UI_COLOUR_CYAN &&
+                                    oldAccent <= UI_COLOUR_MAGENTA
+          ? oldAccent - UI_COLOUR_CYAN : ACCENT_COLOUR_CYAN;
+      accentPaletteIndex = legacyAccentToPalette(compactAccent);
+      switch (oldVu) {
+        case 0: analogVuColourChoice = VU_COLOUR_WARM_WHITE; break;
+        case 3: analogVuColourChoice = VU_COLOUR_GREEN; break;
+        case 4: analogVuColourChoice = VU_COLOUR_AMBER; break;
+        case 5: analogVuColourChoice = VU_COLOUR_MAGENTA; break;
+        case 1:
+        case 2:
+        default: analogVuColourChoice = VU_COLOUR_CYAN; break;
+      }
+      volumeMeterPaletteIndex = legacyVuToPalette(analogVuColourChoice);
+    }
+    themeMigrated = true;
+  }
+  if (themeMigrated) persistThemePreferencesNow();
+  // Build a saved custom face during the hidden boot phase. The first
+  // automatic/manual analogue VU opening therefore has no tinting pause.
+  prepareAnalogVuFaceCache();
+
   brightnessPercent = constrain(preferences.getUChar("brightness", 80),
                                 (uint8_t)10, (uint8_t)100);
   screenTimeoutOption = std::min<uint8_t>(
@@ -16579,6 +17983,23 @@ void setup()
   if (screenDimPercent > 80 || (screenDimPercent % 10) != 0) {
     screenDimPercent = 20;
   }
+
+  // v1.1.2 represented Screen Off as a zero dim level. Preserve that setting
+  // when introducing a separate timeout action, then keep Dim Level within its
+  // new 10-80 percent range.
+  if (preferences.isKey("screen_act")) {
+    const uint8_t storedScreenAction = preferences.getUChar(
+        "screen_act", SCREEN_TIMEOUT_DIM);
+    screenTimeoutAction = storedScreenAction <= SCREEN_TIMEOUT_ANALOG_VU
+        ? (ScreenTimeoutAction)storedScreenAction
+        : SCREEN_TIMEOUT_DIM;
+  } else if (screenDimPercent == 0) {
+    screenTimeoutAction = SCREEN_TIMEOUT_OFF;
+  } else {
+    screenTimeoutAction = SCREEN_TIMEOUT_DIM;
+  }
+  if (screenDimPercent == 0) screenDimPercent = 20;
+
   mediaSeekStepIndex = std::min<uint8_t>(
       preferences.getUChar("media_seek", 1), 2);
   loadRemoteProfile();
@@ -16659,8 +18080,9 @@ void serviceVisibleMeters(bool mediaActive)
   if (uiView != VIEW_HOME && uiView != VIEW_VISUALIZER) return;
   if (mediaActive && (mediaTrackTransitionActive() ||
                       mediaPlaybackBufferLow())) return;
-  const uint32_t interval =
-      mediaActive && uiView == VIEW_VISUALIZER ? 120 : METER_POLL_MS;
+  const uint32_t interval = screenTimeoutViewActive
+      ? SCREEN_TIMEOUT_VU_POLL_MS
+      : (mediaActive && uiView == VIEW_VISUALIZER ? 120 : METER_POLL_MS);
   if ((uint32_t)(millis() - lastMeterAt) < interval) return;
   lastMeterAt = millis();
 
@@ -16729,35 +18151,87 @@ void loop()
   serviceMediaRouteRestore();
   serviceMediaPresetRefresh();
   serviceMediaDeferredRedraw();
+  serviceMediaBrowserRedraw();
 
   if (mediaPlayerPoc.active()) {
-    pollBleRemote();
-    pollEncoder();
-    pollEncoderLongPress();
-    serviceScreenPower();
-    serviceMediaUiAnimations();
-    if (!mediaPlayerPoc.seeking()) serviceVisibleMeters(true);
-
-    if (uiView == VIEW_FEATURE_CONFIRM && featureConfirmUntil &&
-        (long)(millis() - featureConfirmUntil) >= 0) {
-      dismissFeatureConfirmation();
-    }
-    if (uiView == VIEW_CHANGE_OVERLAY && changeOverlayUntil &&
-        (long)(millis() - changeOverlayUntil) >= 0) {
-      dismissChangeOverlay();
-    }
-    if (toastText.length() && (long)(millis() - toastUntil) >= 0) {
-      toastText = "";
-      if (!mediaVolumeOverlayVisible) {
-        if (mediaTrackTransitionActive() || mediaPlaybackBufferLow()) {
-          mediaUiDeferredFullRedraw = true;
-        } else {
-          redrawCurrentView();
-        }
+    // The decoder owns the time-critical prefill/seek windows, but once its
+    // reserve is healthy the same lightweight runtime watcher used by USB must
+    // remain alive.  This keeps Console volume, preset and feature state in
+    // sync without running the much heavier full-state sweep during playback.
+    if (notificationRefreshAt &&
+        (long)(millis() - notificationRefreshAt) >= 0) {
+      notificationRefreshAt = 0;
+      externalRuntimeRefreshRequested = true;
+      if (notificationFullRefreshRequested) {
+        stateRefreshRequested = true;
+        notificationFullRefreshRequested = false;
       }
     }
-    delay(2);
-    return;
+
+    const bool mediaRuntimePollSafe = !mediaPlayerPoc.seeking() &&
+        !mediaTrackTransitionActive() && !mediaPlaybackBufferLow() &&
+        uiView != VIEW_BLE;
+    if (mediaRuntimePollSafe && dspi.connected &&
+        (externalRuntimeRefreshRequested ||
+         millis() - lastStateSyncAt >= 1200)) {
+      lastStateSyncAt = millis();
+      externalRuntimeRefreshRequested = false;
+      const InputSource sourceBeforeRuntimePoll = dspi.source;
+      const bool runtimeChanged = pollExternalRuntimeState();
+      const bool externalSourceChanged =
+          dspi.source != sourceBeforeRuntimePoll;
+
+      // A Console source selection away from I2S takes ownership immediately.
+      // Point the pending restore at that already-selected source so stopping
+      // music restores only the saved I2S rate/clock and never overrides the
+      // Console's choice.
+      if (externalSourceChanged && dspi.source != SRC_I2S &&
+          mediaPlayerPoc.active()) {
+        const InputSource externalSource = dspi.source;
+        if (mediaRoute.captured) mediaRoute.source = externalSource;
+        stopMediaPlayback("external input change");
+      } else if (runtimeChanged && uiView != VIEW_EDIT &&
+                 uiView != VIEW_VISUALIZER &&
+                 uiView != VIEW_FEATURE_CONFIRM &&
+                 uiView != VIEW_CHANGE_OVERLAY &&
+                 uiView != VIEW_MEDIA_NOW_PLAYING) {
+        redrawCurrentView();
+      }
+    }
+
+    // The watcher above can stop playback after a Console input change.  Fall
+    // through to the ordinary non-media loop immediately in that case.
+    if (!mediaPlayerPoc.active()) {
+      serviceMediaRouteRestore();
+    } else {
+      pollBleRemote();
+      pollEncoder();
+      pollEncoderLongPress();
+      serviceScreenPower();
+      serviceMediaUiAnimations();
+      if (!mediaPlayerPoc.seeking()) serviceVisibleMeters(true);
+
+      if (uiView == VIEW_FEATURE_CONFIRM && featureConfirmUntil &&
+          (long)(millis() - featureConfirmUntil) >= 0) {
+        dismissFeatureConfirmation();
+      }
+      if (uiView == VIEW_CHANGE_OVERLAY && changeOverlayUntil &&
+          (long)(millis() - changeOverlayUntil) >= 0) {
+        dismissChangeOverlay();
+      }
+      if (toastText.length() && (long)(millis() - toastUntil) >= 0) {
+        toastText = "";
+        if (!mediaVolumeOverlayVisible) {
+          if (mediaTrackTransitionActive() || mediaPlaybackBufferLow()) {
+            mediaUiDeferredFullRedraw = true;
+          } else {
+            redrawCurrentView();
+          }
+        }
+      }
+      delay(2);
+      return;
+    }
   }
 
   pollBleRemote();
@@ -16783,7 +18257,11 @@ void loop()
 
   if (notificationRefreshAt && (long)(millis() - notificationRefreshAt) >= 0) {
     notificationRefreshAt = 0;
-    stateRefreshRequested = true;
+    externalRuntimeRefreshRequested = true;
+    if (notificationFullRefreshRequested) {
+      stateRefreshRequested = true;
+      notificationFullRefreshRequested = false;
+    }
   }
 
   if (!deferDspiSync && delayedRefreshAt && (long)(millis() - delayedRefreshAt) >= 0) {
@@ -16806,10 +18284,16 @@ void loop()
       syncCurrentState(false);
       redrawCurrentView();
     } else if (!deferDspiSync && !refreshDebouncing &&
-               millis() - lastStateSyncAt >= 1200) {
+               (externalRuntimeRefreshRequested ||
+                millis() - lastStateSyncAt >= 1200)) {
       lastStateSyncAt = millis();
-      syncCurrentState(false);
-      if (uiView != VIEW_EDIT && uiView != VIEW_BLE && uiView != VIEW_VISUALIZER) redrawCurrentView();
+      externalRuntimeRefreshRequested = false;
+      const bool runtimeChanged = pollExternalRuntimeState();
+      if (runtimeChanged && uiView != VIEW_EDIT && uiView != VIEW_BLE &&
+          uiView != VIEW_VISUALIZER && uiView != VIEW_FEATURE_CONFIRM &&
+          uiView != VIEW_CHANGE_OVERLAY) {
+        redrawCurrentView();
+      }
     }
 
     serviceVisibleMeters(false);
