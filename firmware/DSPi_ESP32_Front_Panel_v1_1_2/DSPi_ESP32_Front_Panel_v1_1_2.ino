@@ -140,7 +140,10 @@
 #define MEDIA_ARTWORK_DELAY_MS   1500
 #define MEDIA_ARTWORK_MIN_RING_PERCENT 95
 #define MEDIA_ARTWORK_IO_RESUME_PERCENT 92
-#define MEDIA_LOW_RING_PERCENT    25
+// Pause nonessential LCD/DSPi work while at least ~3.56 seconds of the
+// preferred 44.1 kHz reserve remains. Captured clustered FLAC stalls lasted
+// about five seconds; the full preferred ring now covers about 5.94 seconds.
+#define MEDIA_LOW_RING_PERCENT    60
 #define MEDIA_BROWSER_MIN_RING_PERCENT 80
 #define MEDIA_BROWSER_REDRAW_MS   180
 #define MEDIA_ARTWORK_TASK_STACK 12288

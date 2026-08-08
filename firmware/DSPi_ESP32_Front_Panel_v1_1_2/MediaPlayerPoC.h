@@ -64,7 +64,12 @@ struct MediaPlaybackStats {
   uint32_t sdReadYields = 0;
   uint32_t sdReadMaxMs = 0;
   uint32_t sdReadSliceMaxMs = 0;
+  uint32_t sdSpiWaitMaxMs = 0;
+  uint32_t sdTransferMaxMs = 0;
   uint32_t decoderCallMaxMs = 0;
+  uint32_t decoderSlowCalls = 0;
+  uint32_t decoderLastCallMs = 0;
+  uint32_t decoderLastSlowAtMs = 0;
 };
 
 enum class MediaSeekResult : uint8_t {

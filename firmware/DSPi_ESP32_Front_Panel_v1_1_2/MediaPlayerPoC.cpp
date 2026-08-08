@@ -32,8 +32,11 @@ constexpr uint32_t kSdFrequenciesHz[] = {
 constexpr uint8_t kSdMountAttemptsPerFrequency = 2;
 constexpr uint32_t kSpiLockTimeoutMs = 2000;
 constexpr size_t kMp3ScanLimit = 64 * 1024;
-constexpr size_t kPreferredRingFrames = 32768;
-constexpr size_t kFallbackRingFrames = 16384;
+// Hold enough decoded PCM to ride through a clustered SD/FLAC latency burst.
+// At 44.1 kHz these provide about 5.94 s, 2.97 s and 1.49 s of audio.
+constexpr size_t kPreferredRingFrames = 262144;
+constexpr size_t kFallbackRingFrames = 131072;
+constexpr size_t kEmergencyRingFrames = 65536;
 constexpr size_t kDecodeChunkFrames = 512;
 constexpr size_t kOutputChunkFrames = 256;
 constexpr uint64_t kMp3SeekYieldFrames = 1152ULL * 4ULL;
@@ -42,20 +45,24 @@ constexpr size_t kSeekPrefillFrames = 8192;
 constexpr uint32_t kMinimumPsramBandwidthTenthsMiB = 40;  // 4.0 MiB/s.
 constexpr UBaseType_t kDecoderTaskPriority = 3;
 constexpr UBaseType_t kOutputTaskPriority = 4;
-// Bluetooth controller and NimBLE host work use high-priority CPU0 tasks.
-// Keep both audio tasks on CPU1: i2s_channel_write() blocks while DMA drains,
-// allowing the next-lower-priority decoder to refill without competing with
-// BLE scans. The output task always preempts decoding when DMA needs data.
-constexpr BaseType_t kAudioTaskCore = 1;
+// Keep the time-critical I2S writer isolated on CPU1. Let decode/SD work use
+// whichever CPU is available: I2S always preempts it on CPU1, while an idle
+// CPU0 can absorb it between Bluetooth controller work. Automatic BLE scans
+// are already suspended for active playback.
+constexpr BaseType_t kDecoderTaskCore = tskNO_AFFINITY;
+constexpr BaseType_t kOutputTaskCore = 1;
 constexpr size_t kTailSilenceFrames = 512;
 constexpr uint32_t kTaskStopTimeoutMs = 3000;
 constexpr uint32_t kSeekQuiesceTimeoutMs = 750;
 constexpr uint32_t kSeekPrefillTimeoutMs = 2500;
 // Keep decoder I/O cooperative with the other front-panel tasks.
 constexpr uint32_t kDecoderIoYieldIntervalMs = 20;
+constexpr uint32_t kSlowDecoderCallMs = 100;
 constexpr uint32_t kDecoderSlowReadThresholdMs = 100;
-// Use bounded SD read slices so display and control tasks remain responsive.
-constexpr size_t kDecoderReadSliceBytes = 1024;
+// dr_flac normally asks for 4 KiB. Keep that request contiguous so SdFat can
+// issue a multi-sector read instead of four separately-arbitrated 1 KiB reads.
+// Low-buffer UI guards bound shared-bus impact during abnormal card latency.
+constexpr size_t kDecoderReadSliceBytes = 4096;
 constexpr uint32_t kDecoderTaskStackBytes = 32768;
 constexpr uint32_t kSeekMinimumFreeStackBytes = 8192;
 constexpr EventBits_t kSeekActiveBit = BIT0;
@@ -69,6 +76,8 @@ static_assert((kPreferredRingFrames & (kPreferredRingFrames - 1)) == 0,
               "Preferred PCM ring frame count must be a power of two");
 static_assert((kFallbackRingFrames & (kFallbackRingFrames - 1)) == 0,
               "Fallback PCM ring frame count must be a power of two");
+static_assert((kEmergencyRingFrames & (kEmergencyRingFrames - 1)) == 0,
+              "Emergency PCM ring frame count must be a power of two");
 static_assert(kOutputTaskPriority > kDecoderTaskPriority,
               "I2S output must always preempt media decoding");
 
@@ -468,20 +477,28 @@ size_t cooperativeDecoderRead(MediaFsFile *file,
     const size_t sliceRequest =
         std::min(kDecoderReadSliceBytes, bytesToRead - totalRead);
     const uint32_t sliceStartedAt = millis();
+    uint32_t transferStartedAt = sliceStartedAt;
     size_t sliceRead = 0;
     {
       SharedSpiGuard guard;
+      transferStartedAt = millis();
       if (!(cancelRequested && *cancelRequested) && !file->hadIoError()) {
         sliceRead = file->read(destination + totalRead, sliceRequest);
       }
     }
 
-    const uint32_t sliceElapsedMs = millis() - sliceStartedAt;
+    const uint32_t sliceFinishedAt = millis();
+    const uint32_t spiWaitMs = transferStartedAt - sliceStartedAt;
+    const uint32_t transferElapsedMs = sliceFinishedAt - transferStartedAt;
+    const uint32_t sliceElapsedMs = sliceFinishedAt - sliceStartedAt;
     if (telemetry.stats) {
       __atomic_add_fetch(&telemetry.stats->sdReadSlices, 1U,
                          __ATOMIC_RELAXED);
       updateAtomicMaximum(&telemetry.stats->sdReadSliceMaxMs,
                           sliceElapsedMs);
+      updateAtomicMaximum(&telemetry.stats->sdSpiWaitMaxMs, spiWaitMs);
+      updateAtomicMaximum(&telemetry.stats->sdTransferMaxMs,
+                          transferElapsedMs);
     }
     totalRead += sliceRead;
 
@@ -2826,6 +2843,12 @@ size_t MediaPlayerPoC::decodeFramesFrom(
   }
   const uint32_t decodeElapsedMs = millis() - decodeStartedAt;
   updateAtomicMaximum(&stats.decoderCallMaxMs, decodeElapsedMs);
+  __atomic_store_n(&stats.decoderLastCallMs, decodeElapsedMs,
+                   __ATOMIC_RELEASE);
+  if (decodeElapsedMs >= kSlowDecoderCallMs) {
+    __atomic_add_fetch(&stats.decoderSlowCalls, 1U, __ATOMIC_RELAXED);
+    __atomic_store_n(&stats.decoderLastSlowAtMs, millis(), __ATOMIC_RELEASE);
+  }
   if (decodeElapsedMs >= kDecoderIoYieldIntervalMs) {
     vTaskDelay(1);
   }
@@ -2941,6 +2964,10 @@ bool MediaPlayerPoC::allocateRing()
   if (!pcmRing) {
     pcmRing = allocateFrames(kFallbackRingFrames);
     ringFrameCapacity = pcmRing ? kFallbackRingFrames : 0;
+  }
+  if (!pcmRing) {
+    pcmRing = allocateFrames(kEmergencyRingFrames);
+    ringFrameCapacity = pcmRing ? kEmergencyRingFrames : 0;
   }
   if (!pcmRing || ringFrameCapacity == 0) return false;
 
@@ -3265,7 +3292,7 @@ MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
   stats.ringLowWaterFrames = (uint32_t)ringAvailable();
   BaseType_t created = xTaskCreatePinnedToCore(
       decoderTaskEntry, "media-decode", kDecoderTaskStackBytes, this,
-      kDecoderTaskPriority, &decoderTaskHandle, kAudioTaskCore);
+      kDecoderTaskPriority, &decoderTaskHandle, kDecoderTaskCore);
   if (created != pdPASS) {
     stop();
     setError("decoder task creation failed");
@@ -3276,7 +3303,7 @@ MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
 
   created = xTaskCreatePinnedToCore(
       outputTaskEntry, "media-i2s", 8192, this, kOutputTaskPriority,
-      &outputTaskHandle, kAudioTaskCore);
+      &outputTaskHandle, kOutputTaskCore);
   if (created != pdPASS) {
     stop();
     setError("I2S output task creation failed");
@@ -3548,7 +3575,9 @@ void MediaPlayerPoC::printPlaybackStatus(Stream &out) const
       "dec_stack_free=%lu out_stack_free=%lu seek=%lu/%lu/%lu "
       "seek_ms=%lu sd_cb=%lu sd_slices=%lu sd_slow=%lu sd_err=%lu "
       "sd_yield=%lu cb_max_ms=%lu slice_max_ms=%lu "
-      "decode_max_ms=%lu path=%s",
+      "spi_wait_max_ms=%lu sd_xfer_max_ms=%lu "
+      "decode_max_ms=%lu decode_slow=%lu decode_last_ms=%lu "
+      "last_decode_slow_ms=%lu ring_ms=%lu/%lu sd_clock=%lu path=%s",
       stateName(state), formatName(currentFile.format),
       (unsigned long)currentFile.sampleRate, currentFile.bitsPerSample,
       currentFile.channels, (unsigned long long)snapshot.decodedFrames,
@@ -3574,7 +3603,21 @@ void MediaPlayerPoC::printPlaybackStatus(Stream &out) const
       (unsigned long)snapshot.sdReadYields,
       (unsigned long)snapshot.sdReadMaxMs,
       (unsigned long)snapshot.sdReadSliceMaxMs,
+      (unsigned long)snapshot.sdSpiWaitMaxMs,
+      (unsigned long)snapshot.sdTransferMaxMs,
       (unsigned long)snapshot.decoderCallMaxMs,
+      (unsigned long)snapshot.decoderSlowCalls,
+      (unsigned long)snapshot.decoderLastCallMs,
+      (unsigned long)snapshot.decoderLastSlowAtMs,
+      currentFile.sampleRate
+          ? (unsigned long)(((uint64_t)ringAvailable() * 1000ULL) /
+                            currentFile.sampleRate)
+          : 0UL,
+      currentFile.sampleRate
+          ? (unsigned long)(((uint64_t)ringFrameCapacity * 1000ULL) /
+                            currentFile.sampleRate)
+          : 0UL,
+      (unsigned long)mountedFrequencyHz,
       currentPath[0] ? currentPath : "(none)");
   if (state == MediaPlaybackState::Error && errorText[0]) {
     out.printf(" error=%s", errorText);
@@ -3646,8 +3689,18 @@ MediaPlaybackStats MediaPlayerPoC::playbackStats() const
       __atomic_load_n(&stats.sdReadMaxMs, __ATOMIC_ACQUIRE);
   snapshot.sdReadSliceMaxMs =
       __atomic_load_n(&stats.sdReadSliceMaxMs, __ATOMIC_ACQUIRE);
+  snapshot.sdSpiWaitMaxMs =
+      __atomic_load_n(&stats.sdSpiWaitMaxMs, __ATOMIC_ACQUIRE);
+  snapshot.sdTransferMaxMs =
+      __atomic_load_n(&stats.sdTransferMaxMs, __ATOMIC_ACQUIRE);
   snapshot.decoderCallMaxMs =
       __atomic_load_n(&stats.decoderCallMaxMs, __ATOMIC_ACQUIRE);
+  snapshot.decoderSlowCalls =
+      __atomic_load_n(&stats.decoderSlowCalls, __ATOMIC_ACQUIRE);
+  snapshot.decoderLastCallMs =
+      __atomic_load_n(&stats.decoderLastCallMs, __ATOMIC_ACQUIRE);
+  snapshot.decoderLastSlowAtMs =
+      __atomic_load_n(&stats.decoderLastSlowAtMs, __ATOMIC_ACQUIRE);
   return snapshot;
 }
 
