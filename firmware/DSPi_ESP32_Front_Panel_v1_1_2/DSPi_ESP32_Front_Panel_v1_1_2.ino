@@ -186,6 +186,7 @@
 #define CHANGE_OVERLAY_MS 1800
 #define PRESET_INPUT_CHANGE_OVERLAY_MS 3200
 #define PRESET_SAVE_REFRESH_MS 350
+#define PRESET_SAVE_RESPONSE_TIMEOUT_MS 650
 #define SCREEN_FADE_MS 320
 #define SCREEN_TIMEOUT_VU_POLL_MS 180
 #define SCREEN_TIMEOUT_VU_SPI_TRY_MS 4
@@ -7379,7 +7380,14 @@ DspiTxnResult dspiTransactionResult(bool isGet, uint8_t request, uint16_t value,
   for (uint8_t attempt = 0; attempt < DSPI_TRANSACTION_ATTEMPTS; attempt++) {
     dspiSendRequest(isGet, request, value, index, txPayload, txLength);
 
-    unsigned long deadline = millis() + DSPI_RESPONSE_TIMEOUT_MS;
+    // An occupied preset can require a sector erase before the Pico's UART
+    // response is observable on older V28 builds. Keep normal control traffic
+    // at the proven short timeout, but allow the idempotent 0x90 save request
+    // to wait through that overwrite blackout instead of reporting a false
+    // DSPi error after the save was already accepted.
+    const uint16_t responseTimeoutMs = request == REQ_PRESET_SAVE
+        ? PRESET_SAVE_RESPONSE_TIMEOUT_MS : DSPI_RESPONSE_TIMEOUT_MS;
+    unsigned long deadline = millis() + responseTimeoutMs;
     finalResult = DSPI_TXN_TIMEOUT;
     while ((long)(millis() - deadline) < 0) {
       UartFrame frame = {};
@@ -10250,9 +10258,17 @@ bool saveCurrentPreset(uint8_t destinationSlot)
 
   uint8_t payload[1] = {0xFF};
   uint16_t length = 0;
-  if (!dspiGet(REQ_PRESET_SAVE, destinationSlot, 1,
-               payload, sizeof(payload), length) ||
-      length != 1 || payload[0] != 0) return false;
+  const DspiTxnResult saveResult = dspiGetResult(
+      REQ_PRESET_SAVE, destinationSlot, 1,
+      payload, sizeof(payload), length, true);
+  if (saveResult != DSPI_TXN_OK || length != 1 || payload[0] != 0) {
+    Serial.printf("PRESET SAVE: rejected destination=P%u transport=%s "
+                  "length=%u status=0x%02X\n",
+                  (unsigned)destinationSlot + 1U,
+                  dspiTxnResultText(saveResult), (unsigned)length,
+                  length ? payload[0] : 0xFF);
+    return false;
+  }
 
   // The DSPi command captures feature parameters and User Volume (the volume
   // restored when this slot loads at startup), plus Master Volume in Mode 1.
