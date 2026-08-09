@@ -45,6 +45,20 @@ See [CHANGELOG-v1.2.0.md](CHANGELOG-v1.2.0.md) for the complete release summary 
 
 The UART runs at 115200 baud. Enable the DSPi UART interface with TX GPIO16 and RX GPIO17.
 
+### ESP32 music-player I2S to DSPi
+
+| ESP32-S3-LCD-2 | DSPi Pico / Pico 2 | Function |
+|---|---|---|
+| GPIO13 | GPIO1 | I2S serial audio data from the ESP32 to the DSPi RX input |
+| GPIO14 | GPIO14 | I2S bit clock (BCLK) |
+| GPIO15 | GPIO15 | I2S word clock (LRCLK) |
+| GND | GND | Common ground |
+
+GPIO1 is the tested DSPi I2S RX data setting and the current DSPi default. The
+Pico data GPIO is configurable in DSPi Console; if it is changed, move the data
+wire to the selected GPIO. The ESP32 queries the active DSPi RX pin before
+starting playback. All I2S signals use 3.3 V logic.
+
 ### Rotary encoder
 
 | Encoder | ESP32-S3-LCD-2 |
